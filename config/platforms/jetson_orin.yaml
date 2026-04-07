@@ -1,0 +1,21 @@
+# Platform override for NVIDIA Jetson Orin (Nano/NX/AGX).
+# Merged on top of fast_livo2_default.yaml at launch time.
+
+preprocess:
+    point_filter_num: 6              # more aggressive downsample for ARM
+
+mapping:
+    max_iteration: 2                 # fewer iterations for real-time on ARM
+    filter_size_surf: 0.6
+    filter_size_map: 0.6
+    det_range: 80.0                  # reduce detection range
+
+    # Visual — lower resolution for Jetson
+    camera:
+        width: 640
+        height: 480
+
+robonix:
+    relocalization:
+        icp_frequency: 1.0          # lower ICP rate on ARM
+        voxel_size_coarse: 0.20

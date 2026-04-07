@@ -1,0 +1,19 @@
+# Platform override for x86 desktop / workstation.
+# Full-resolution settings.
+
+preprocess:
+    point_filter_num: 3
+
+mapping:
+    max_iteration: 4
+    filter_size_surf: 0.4
+    filter_size_map: 0.4
+    det_range: 150.0
+
+    camera:
+        width: 1280
+        height: 720
+
+robonix:
+    relocalization:
+        icp_frequency: 5.0

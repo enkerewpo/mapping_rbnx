@@ -1,0 +1,75 @@
+# mapping_rbnx — Robonix SLAM service based on FAST-LIVO2.
+# Provides 3D point cloud mapping + localization as a Robonix system service.
+# Consumes LiDAR, IMU, and camera primitives; produces odometry, point cloud map,
+# and localization pose. Supports Jetson (Orin/Xavier) and x86 platforms.
+manifestVersion: 1
+
+build:
+  script: scripts/build.sh
+
+package:
+  id: com.robonix.pkg.mapping
+  name: mapping_rbnx
+  version: 0.1.0
+  vendor: robonix
+  description: >-
+    FAST-LIVO2-based 3D LiDAR-Inertial-Visual SLAM service for Robonix.
+    Provides real-time odometry, colored point cloud mapping, and
+    relocalization against pre-built maps. Optimized for Jetson Orin/Xavier
+    and x86 platforms.
+  license: MulanPSL-2.0
+
+nodes:
+  - id: com.robonix.mapping.fast_livo2
+    type: compose
+    start: |
+      CF=(-f docker/compose.yaml)
+      if [ -f /etc/nv_tegra_release ] 2>/dev/null; then
+        CF+=(-f docker/compose.jetson.yaml)
+        echo "[mapping_rbnx] Jetson platform detected — merging compose.jetson.yaml"
+      elif command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+        CF+=(-f docker/compose.gpu.yaml)
+        echo "[mapping_rbnx] NVIDIA GPU detected — merging compose.gpu.yaml"
+      fi
+      exec docker compose "${CF[@]}" up --build
+
+  - id: com.robonix.mapping.atlas_bridge
+    type: python
+    start: |
+      export PYTHONPATH="$(pwd)/src:${PYTHONPATH:-}"
+      exec python -m mapping_rbnx.atlas_bridge
+
+interfaces:
+  provides:
+    # SLAM data output
+    - id: robonix/prm/base/odom
+    # SLAM control RPCs
+    - id: robonix/sys/slam/status
+    - id: robonix/sys/slam/save_map
+    - id: robonix/sys/slam/load_map
+    - id: robonix/sys/slam/switch_mode
+    - id: robonix/sys/slam/set_initial_pose
+  consumes:
+    # Sensor inputs (from hardware PRM providers)
+    - id: robonix/prm/sensor/lidar
+    - id: robonix/prm/sensor/imu
+    - id: robonix/prm/camera/rgb
+
+launchProfiles:
+  mapping:
+    nodes:
+      com.robonix.mapping.fast_livo2:
+        env:
+          SLAM_MODE: mapping
+      com.robonix.mapping.atlas_bridge:
+        env:
+          SLAM_MODE: mapping
+  localization:
+    nodes:
+      com.robonix.mapping.fast_livo2:
+        env:
+          SLAM_MODE: localization
+          MAP_FILE: /maps/map.pcd
+      com.robonix.mapping.atlas_bridge:
+        env:
+          SLAM_MODE: localization

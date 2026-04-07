@@ -1,0 +1,48 @@
+# Base compose — FAST-LIVO2 ROS2 node + atlas_bridge
+# Platform overrides: compose.jetson.yaml, compose.gpu.yaml
+
+services:
+  fast-livo2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: mapping_rbnx:latest
+    container_name: mapping_rbnx_slam
+    network_mode: host
+    ipc: host
+    privileged: true
+    environment:
+      - SLAM_MODE=${SLAM_MODE:-mapping}
+      - MAP_FILE=${MAP_FILE:-}
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+    volumes:
+      - /dev:/dev
+      - ${MAP_SAVE_DIR:-./maps}:/maps
+      - ../config:/config:ro
+    command: >
+      ros2 launch /ws/launch/slam_mapping.launch.py
+        config:=/config/fast_livo2_default.yaml
+    restart: unless-stopped
+
+  atlas-bridge:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: mapping_rbnx:latest
+    container_name: mapping_rbnx_bridge
+    network_mode: host
+    environment:
+      - ROBONIX_ATLAS=${ROBONIX_ATLAS:-localhost:50051}
+      - MAPPING_GRPC_PORT=${MAPPING_GRPC_PORT:-50120}
+      - SLAM_MODE=${SLAM_MODE:-mapping}
+      - MAP_FILE=${MAP_FILE:-}
+      - MAP_SAVE_DIR=/maps
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+    volumes:
+      - ${MAP_SAVE_DIR:-./maps}:/maps
+    command: python -m mapping_rbnx.atlas_bridge
+    depends_on:
+      - fast-livo2
+    restart: unless-stopped

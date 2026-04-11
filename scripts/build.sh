@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # build.sh — Build the mapping_rbnx package.
 # Called by `rbnx build -p .`; stamps rbnx-build/.rbnx-built on success.
+#
+# Default: Docker build (auto-detect platform: x86 or Jetson).
+# Override with RBNX_BUILD_MODE=native for host colcon build (requires ROS2 Humble).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -12,18 +15,21 @@ PROTO_GEN="$PKG_ROOT/proto_gen"
 ROBONIX_ROOT="${ROBONIX_ROOT:-$(cd "$PKG_ROOT/../robonix" 2>/dev/null && pwd || echo "")}"
 RUST_ROOT="$ROBONIX_ROOT/rust"
 
-echo "=== mapping_rbnx build ==="
+# Build mode: docker (default) or native
+BUILD_MODE="${RBNX_BUILD_MODE:-docker}"
+
+echo "=== mapping_rbnx build (mode: $BUILD_MODE) ==="
 
 if [[ "${RBNX_BUILD_CLEAN:-}" == "1" ]]; then
     rm -rf "$BUILD_DIR" "$PROTO_GEN"
 fi
 
-# ── 1. Ensure FAST-LIVO2 submodule is initialized ────────────────────────────
-LIVO2_DIR="$PKG_ROOT/third_party/FAST-LIVO2"
-if [ ! -f "$LIVO2_DIR/CMakeLists.txt" ]; then
-    echo "[build] Initializing FAST-LIVO2 submodule..."
+# ── 1. Ensure FASTLIO2_ROS2 submodule is initialized ────────────────────────
+FASTLIO2_DIR="$PKG_ROOT/third_party/FASTLIO2_ROS2"
+if [ ! -f "$FASTLIO2_DIR/fastlio2/CMakeLists.txt" ]; then
+    echo "[build] Initializing FASTLIO2_ROS2 submodule..."
     cd "$PKG_ROOT"
-    git submodule update --init --recursive third_party/FAST-LIVO2
+    git submodule update --init --recursive third_party/FASTLIO2_ROS2
 fi
 
 # ── 2. Install Python dependencies ──────────────────────────────────────────
@@ -77,18 +83,39 @@ else
     echo "[build]   set ROBONIX_ROOT env var to point to the robonix repo"
 fi
 
-# ── 4. Build Docker images ───────────────────────────────────────────────────
-echo "[build] Building Docker images..."
-cd "$PKG_ROOT"
-if [ -f /etc/nv_tegra_release ] 2>/dev/null; then
-    echo "[build] Jetson platform — building with Jetson Dockerfile"
-    docker build -f docker/Dockerfile.jetson -t mapping_rbnx:jetson . || true
-elif command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
-    echo "[build] x86 GPU platform — building with GPU Dockerfile"
-    docker build -f docker/Dockerfile -t mapping_rbnx:latest . || true
+# ── 4. Build SLAM packages ──────────────────────────────────────────────────
+if [[ "$BUILD_MODE" == "native" ]]; then
+    echo "[build] Native colcon build (requires ROS2 Humble on host)..."
+    WS_ROOT="${ROS2_WS:-$(cd "$PKG_ROOT/.." 2>/dev/null && pwd)}"
+    WS_SRC="$WS_ROOT/src"
+    mkdir -p "$WS_SRC"
+
+    for pkg in interface fastlio2 pgo localizer hba; do
+        src="$FASTLIO2_DIR/$pkg"
+        dst="$WS_SRC/$pkg"
+        if [ ! -e "$dst" ] && [ -d "$src" ]; then
+            ln -sf "$src" "$dst"
+            echo "[build] Symlinked $pkg → $dst"
+        fi
+    done
+
+    cd "$WS_ROOT"
+    if [ -f /opt/ros/humble/setup.bash ]; then
+        source /opt/ros/humble/setup.bash
+    fi
+    colcon build --symlink-install \
+        --packages-select interface fastlio2 pgo localizer hba \
+        --cmake-args -DCMAKE_BUILD_TYPE=Release
 else
-    echo "[build] CPU-only platform — building with base Dockerfile"
-    docker build -f docker/Dockerfile -t mapping_rbnx:latest . || true
+    echo "[build] Docker build..."
+    cd "$PKG_ROOT"
+    if [ -f /etc/nv_tegra_release ] 2>/dev/null; then
+        echo "[build] Jetson platform detected — using Dockerfile.jetson"
+        docker build -f docker/Dockerfile.jetson -t mapping_rbnx:jetson .
+    else
+        echo "[build] x86 platform — using Dockerfile"
+        docker build -f docker/Dockerfile -t mapping_rbnx:latest .
+    fi
 fi
 
 # ── 5. Stamp ─────────────────────────────────────────────────────────────────

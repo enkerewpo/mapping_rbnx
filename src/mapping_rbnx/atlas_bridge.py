@@ -10,20 +10,23 @@ Architecture:
                                 │ discover primitive endpoints
                                 ▼
   PRM providers ──ROS2 topics──► atlas_bridge ──gRPC──► consumers
-  (lidar/imu/camera)                 │
+  (lidar/imu)                        │
                                      ▼
-                           FAST-LIVO2 (SLAM engine)
+                           FASTLIO2_ROS2 (SLAM engine)
+                           ├── fastlio2 (LIO odometry)
+                           ├── pgo (loop closure + pose graph)
+                           └── localizer (ICP relocalization)
 
 Primitive consumption flow:
-  1. QueryNodes(contract_id="robonix/prm/sensor/lidar") → find provider node
+  1. QueryNodes(contract_id="robonix/prm/sensor/lidar3d") → find provider node
   2. NegotiateChannel(transport="ros2") → get ROS2 topic from metadata
-  3. Subscribe to discovered topic → feed into FAST-LIVO2
+  3. Subscribe to discovered topic → feed into fastlio2
 
 gRPC data-plane services provided (codegen'd from robonix contracts):
   PrmBaseOdom.Stream                — stream nav_msgs/Odometry
   SysSlamStatus.Call                — get SLAM status
-  SysSlamSaveMap.Call               — save map
-  SysSlamLoadMap.Call               — load map
+  SysSlamSaveMap.Call               — save map (via /pgo/save_maps)
+  SysSlamLoadMap.Call               — load map (via /localizer/relocalize)
   SysSlamSwitchMode.Call            — switch mode
   SysSlamSetInitialPose.Call        — set initial pose
 
@@ -36,7 +39,6 @@ Env vars:
 """
 import json
 import logging
-import math
 import os
 import subprocess
 import sys
@@ -79,7 +81,6 @@ import slam_pb2
 _rclpy = None
 _OdometryMsg = None
 _PointCloud2Msg = None
-
 
 def _import_ros2():
     global _rclpy, _OdometryMsg, _PointCloud2Msg
@@ -202,7 +203,7 @@ def _ros2_odom_to_proto(msg) -> nav_msgs_pb2.Odometry:
 # ── gRPC Servicers ────────────────────────────────────────────────────────────
 
 class PrmBaseOdomServicer(robonix_contracts_pb2_grpc.PrmBaseOdomServicer):
-    """Contract: robonix/prm/base/odom — stream Odometry from FAST-LIVO2."""
+    """Contract: robonix/prm/base/odom — stream Odometry from fastlio2."""
 
     def Stream(self, request, context):
         log.info("PrmBaseOdom.Stream client connected")
@@ -220,33 +221,35 @@ class PrmBaseOdomServicer(robonix_contracts_pb2_grpc.PrmBaseOdomServicer):
 
 
 class SysSlamStatusServicer(robonix_contracts_pb2_grpc.SysSlamStatusServicer):
-    """Contract: robonix/sys/slam/status"""
+    """Contract: robonix/srv/slam/status"""
 
     def Call(self, request, context):
         return state.get_status_proto()
 
 
 class SysSlamSaveMapServicer(robonix_contracts_pb2_grpc.SysSlamSaveMapServicer):
-    """Contract: robonix/sys/slam/save_map"""
+    """Contract: robonix/srv/slam/save_map — calls /pgo/save_maps ROS2 service."""
 
     def Call(self, request, context):
         filename = request.filename.strip() or "map"
         save_dir = Path(state.map_save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
-        save_path = save_dir / f"{filename}.pcd"
+        save_path = save_dir / filename
 
         resp = slam_pb2.SaveMap_Response()
 
         if _rclpy is not None:
             try:
+                # Call the PGO save_maps service (interface/srv/SaveMaps)
                 result = subprocess.run(
-                    ["ros2", "service", "call", "/robonix/slam/save_map",
-                     "std_srvs/srv/Trigger", "{}"],
-                    capture_output=True, text=True, timeout=30,
+                    ["ros2", "service", "call", "/pgo/save_maps",
+                     "interface/srv/SaveMaps",
+                     f"{{file_path: '{save_path}', save_patches: true}}"],
+                    capture_output=True, text=True, timeout=60,
                 )
                 resp.success = result.returncode == 0
                 resp.path = str(save_path)
-                resp.message = "Map saved" if resp.success else result.stderr
+                resp.message = "Map saved via PGO" if resp.success else result.stderr
             except Exception as e:
                 resp.success = False
                 resp.message = str(e)
@@ -258,7 +261,7 @@ class SysSlamSaveMapServicer(robonix_contracts_pb2_grpc.SysSlamSaveMapServicer):
 
 
 class SysSlamLoadMapServicer(robonix_contracts_pb2_grpc.SysSlamLoadMapServicer):
-    """Contract: robonix/sys/slam/load_map"""
+    """Contract: robonix/srv/slam/load_map — calls /localizer/relocalize ROS2 service."""
 
     def Call(self, request, context):
         map_path = request.path.strip()
@@ -274,20 +277,29 @@ class SysSlamLoadMapServicer(robonix_contracts_pb2_grpc.SysSlamLoadMapServicer):
 
         if _rclpy is not None:
             try:
-                subprocess.run(
-                    ["ros2", "param", "set", "/fast_livo2", "map_file", map_path],
-                    capture_output=True, text=True, timeout=10,
+                # Call the localizer relocalize service (interface/srv/Relocalize)
+                # Initial pose defaults to origin; use set_initial_pose for offset
+                result = subprocess.run(
+                    ["ros2", "service", "call", "/localizer/relocalize",
+                     "interface/srv/Relocalize",
+                     f"{{pcd_path: '{map_path}', x: 0.0, y: 0.0, z: 0.0, "
+                     f"yaw: 0.0, pitch: 0.0, roll: 0.0}}"],
+                    capture_output=True, text=True, timeout=30,
                 )
+                resp.success = result.returncode == 0
+                resp.message = f"Relocalization initiated: {map_path}" if resp.success else result.stderr
             except Exception as e:
-                log.warning("Failed to set map_file param: %s", e)
+                resp.success = False
+                resp.message = str(e)
+        else:
+            resp.success = False
+            resp.message = "ROS2 not available"
 
-        resp.success = True
-        resp.message = f"Map loaded: {map_path}. Mode → localization."
         return resp
 
 
 class SysSlamSwitchModeServicer(robonix_contracts_pb2_grpc.SysSlamSwitchModeServicer):
-    """Contract: robonix/sys/slam/switch_mode"""
+    """Contract: robonix/srv/slam/switch_mode"""
 
     def Call(self, request, context):
         mode = request.mode.strip().lower()
@@ -308,32 +320,47 @@ class SysSlamSwitchModeServicer(robonix_contracts_pb2_grpc.SysSlamSwitchModeServ
 
 
 class SysSlamSetInitialPoseServicer(robonix_contracts_pb2_grpc.SysSlamSetInitialPoseServicer):
-    """Contract: robonix/sys/slam/set_initial_pose"""
+    """Contract: robonix/srv/slam/set_initial_pose — calls /localizer/relocalize with pose."""
 
     def Call(self, request, context):
         resp = slam_pb2.SetInitialPose_Response()
         pose = request.pose
 
-        if _rclpy is not None:
+        if _rclpy is not None and state.map_file:
             try:
                 p = pose.pose.position
                 o = pose.pose.orientation
-                cmd = (
-                    f"ros2 topic pub --once /initialpose "
-                    f"geometry_msgs/msg/PoseWithCovarianceStamped "
-                    f"'{{header: {{frame_id: {pose.header.frame_id or 'map'}}}, "
-                    f"pose: {{pose: {{position: {{x: {p.x}, y: {p.y}, z: {p.z}}}, "
-                    f"orientation: {{x: {o.x}, y: {o.y}, z: {o.z}, w: {o.w}}}}}}}}}'"
+                # Convert quaternion to euler for the Relocalize service
+                import math
+                # yaw from quaternion (simplified)
+                siny_cosp = 2.0 * (o.w * o.z + o.x * o.y)
+                cosy_cosp = 1.0 - 2.0 * (o.y * o.y + o.z * o.z)
+                yaw = math.atan2(siny_cosp, cosy_cosp)
+                sinp = 2.0 * (o.w * o.y - o.z * o.x)
+                pitch = math.asin(max(-1.0, min(1.0, sinp)))
+                sinr_cosp = 2.0 * (o.w * o.x + o.y * o.z)
+                cosr_cosp = 1.0 - 2.0 * (o.x * o.x + o.y * o.y)
+                roll = math.atan2(sinr_cosp, cosr_cosp)
+
+                result = subprocess.run(
+                    ["ros2", "service", "call", "/localizer/relocalize",
+                     "interface/srv/Relocalize",
+                     f"{{pcd_path: '{state.map_file}', "
+                     f"x: {p.x}, y: {p.y}, z: {p.z}, "
+                     f"yaw: {yaw}, pitch: {pitch}, roll: {roll}}}"],
+                    capture_output=True, text=True, timeout=30,
                 )
-                subprocess.run(cmd, shell=True, capture_output=True, timeout=10)
-                resp.success = True
-                resp.message = f"Initial pose set: [{p.x:.2f}, {p.y:.2f}, {p.z:.2f}]"
+                resp.success = result.returncode == 0
+                resp.message = (
+                    f"Relocalization with pose [{p.x:.2f}, {p.y:.2f}, {p.z:.2f}]"
+                    if resp.success else result.stderr
+                )
             except Exception as e:
                 resp.success = False
                 resp.message = str(e)
         else:
             resp.success = False
-            resp.message = "ROS2 not available"
+            resp.message = "ROS2 not available or no map loaded"
 
         return resp
 
@@ -341,28 +368,24 @@ class SysSlamSetInitialPoseServicer(robonix_contracts_pb2_grpc.SysSlamSetInitial
 # ── Primitive discovery via Atlas ─────────────────────────────────────────────
 
 # Consumed primitives: contract_id → (ros2_msg_type, fallback_topic, callback)
+# Note: no camera — FASTLIO2 is LiDAR-Inertial only
 _CONSUMED_PRIMITIVES = {
-    "robonix/prm/sensor/lidar": {
-        "ros2_msg_type": "sensor_msgs/msg/PointCloud2",
+    "robonix/prm/sensor/lidar3d": {
+        "ros2_msg_type": "livox_ros_driver2/msg/CustomMsg",
         "fallback_topic": "/livox/lidar",
-        "description": "LiDAR point cloud",
+        "description": "3D LiDAR point cloud (Livox CustomMsg)",
     },
     "robonix/prm/sensor/imu": {
         "ros2_msg_type": "sensor_msgs/msg/Imu",
         "fallback_topic": "/livox/imu",
         "description": "IMU measurements",
     },
-    "robonix/prm/camera/rgb": {
-        "ros2_msg_type": "sensor_msgs/msg/Image",
-        "fallback_topic": "/camera/image_raw",
-        "description": "Camera RGB image",
-    },
 }
 
-# FAST-LIVO2 output topics (produced by SLAM engine, consumed by bridge)
+# FASTLIO2 output topics (produced by SLAM engine, consumed by bridge)
 _SLAM_OUTPUT_TOPICS = {
-    "odom": "/robonix/slam/odom",
-    "cloud": "/robonix/slam/cloud_registered",
+    "odom": "/fastlio2/lio_odom",
+    "cloud": "/fastlio2/body_cloud",
 }
 
 
@@ -378,7 +401,6 @@ def _discover_primitive_topic(stub, node_id: str, contract_id: str, fallback: st
       3. Parse endpoint/metadata for ros2_topic
     """
     try:
-        # Step 1: discover providers for this contract
         resp = stub.QueryNodes(pb.QueryNodesRequest(
             contract_id=contract_id,
             transport="ros2",
@@ -391,13 +413,11 @@ def _discover_primitive_topic(stub, node_id: str, contract_id: str, fallback: st
         provider = resp.nodes[0]
         provider_node_id = provider.node_id
 
-        # Find the interface that matches our contract
         interface_name = ""
         ros2_topic = fallback
         for iface in provider.interfaces:
             if iface.contract_id == contract_id:
                 interface_name = iface.name
-                # Try to get ros2_topic from metadata
                 try:
                     meta = json.loads(iface.metadata_json) if iface.metadata_json else {}
                     ros2_topic = meta.get("ros2_topic", fallback)
@@ -410,7 +430,6 @@ def _discover_primitive_topic(stub, node_id: str, contract_id: str, fallback: st
                      contract_id, provider_node_id, fallback)
             return fallback
 
-        # Step 2: negotiate channel
         ch_resp = stub.NegotiateChannel(pb.NegotiateChannelRequest(
             consumer_id=node_id,
             provider_node_id=provider_node_id,
@@ -418,11 +437,8 @@ def _discover_primitive_topic(stub, node_id: str, contract_id: str, fallback: st
             transport="ros2",
         ))
 
-        # The negotiated endpoint for ROS2 is the topic name
-        # (stored in metadata or returned as endpoint)
         negotiated_topic = ros2_topic
         if ch_resp.endpoint:
-            # For ROS2, endpoint might be "topic:/livox/lidar" or just the topic
             ep = ch_resp.endpoint
             if ep.startswith("topic:"):
                 negotiated_topic = ep[len("topic:"):]
@@ -454,20 +470,20 @@ def _discover_all_primitives(stub, node_id: str) -> dict:
 
 def _ros2_spin_thread(primitive_topics: dict):
     """Spin a ROS2 node that subscribes to:
-    1. Discovered primitive topics (forwarded to FAST-LIVO2 via topic remapping)
-    2. FAST-LIVO2 output topics (odom, cloud → SlamState for gRPC serving)
+    1. Discovered primitive topics (forwarded to FASTLIO2 via topic remapping)
+    2. FASTLIO2 output topics (odom, cloud → SlamState for gRPC serving)
     """
     _rclpy.init()
     node = _rclpy.create_node("mapping_rbnx_bridge")
 
-    # Subscribe to FAST-LIVO2 outputs (produced by SLAM engine)
+    # Subscribe to FASTLIO2 outputs (produced by SLAM engine)
     odom_topic = _SLAM_OUTPUT_TOPICS["odom"]
     cloud_topic = _SLAM_OUTPUT_TOPICS["cloud"]
     node.create_subscription(_OdometryMsg, odom_topic, state.update_odom, 10)
     node.create_subscription(_PointCloud2Msg, cloud_topic, state.update_cloud, 10)
     log.info("Subscribed to SLAM outputs: %s, %s", odom_topic, cloud_topic)
 
-    # Log discovered primitive inputs (FAST-LIVO2 subscribes to these directly;
+    # Log discovered primitive inputs (fastlio2 subscribes to these directly;
     # the bridge monitors them for health reporting)
     for contract_id, topic in primitive_topics.items():
         desc = _CONSUMED_PRIMITIVES[contract_id]["description"]
@@ -517,7 +533,7 @@ def _register_and_discover(grpc_port: int) -> dict:
     atlas_endpoint = os.environ.get("ROBONIX_ATLAS", "localhost:50051")
     channel = grpc.insecure_channel(atlas_endpoint)
     stub = pb_grpc.RobonixRuntimeStub(channel)
-    node_id = "com.robonix.mapping.fast_livo2"
+    node_id = "com.robonix.mapping.fastlio2"
 
     primitive_topics = {}
 
@@ -525,8 +541,7 @@ def _register_and_discover(grpc_port: int) -> dict:
         # ── Step 1: Register this node ────────────────────────────────────
         stub.RegisterNode(pb.RegisterNodeRequest(
             node_id=node_id,
-            # NOTE: namespace/kind deprecated, but Atlas still validates
-            namespace="robonix/sys/slam",
+            namespace="robonix/srv/slam",
             kind="service",
             distro="humble",
             skills=_load_skills(),
@@ -540,20 +555,33 @@ def _register_and_discover(grpc_port: int) -> dict:
                 "ros2_msg_type": "nav_msgs/msg/Odometry",
                 "grpc_service": "PrmBaseOdom",
             }),
-            ("status", ["grpc"], "robonix/sys/slam/status", {
+            ("status", ["grpc"], "robonix/srv/slam/status", {
                 "grpc_service": "SysSlamStatus",
             }),
-            ("save_map", ["grpc"], "robonix/sys/slam/save_map", {
+            ("save_map", ["grpc"], "robonix/srv/slam/save_map", {
                 "grpc_service": "SysSlamSaveMap",
             }),
-            ("load_map", ["grpc"], "robonix/sys/slam/load_map", {
+            ("load_map", ["grpc"], "robonix/srv/slam/load_map", {
                 "grpc_service": "SysSlamLoadMap",
             }),
-            ("switch_mode", ["grpc"], "robonix/sys/slam/switch_mode", {
+            ("switch_mode", ["grpc"], "robonix/srv/slam/switch_mode", {
                 "grpc_service": "SysSlamSwitchMode",
             }),
-            ("set_initial_pose", ["grpc"], "robonix/sys/slam/set_initial_pose", {
+            ("set_initial_pose", ["grpc"], "robonix/srv/slam/set_initial_pose", {
                 "grpc_service": "SysSlamSetInitialPose",
+            }),
+            # ── map data plane ──────────────────────────────────────────
+            ("map_pointcloud", ["ros2"], "robonix/srv/common/map/pointcloud", {
+                "ros2_topic": "/fastlio2/world_cloud",
+                "ros2_msg_type": "sensor_msgs/msg/PointCloud2",
+            }),
+            ("map_occupancy_grid", ["ros2"], "robonix/srv/common/map/occupancy_grid", {
+                "ros2_topic": "/robonix/map/occupancy_grid",
+                "ros2_msg_type": "nav_msgs/msg/OccupancyGrid",
+            }),
+            ("map_scan_2d", ["ros2"], "robonix/srv/common/map/scan_2d", {
+                "ros2_topic": "/robonix/map/scan_2d",
+                "ros2_msg_type": "sensor_msgs/msg/LaserScan",
             }),
         ]
 
@@ -571,13 +599,10 @@ def _register_and_discover(grpc_port: int) -> dict:
                  node_id, len(interfaces), grpc_port)
 
         # ── Step 3: Discover consumed primitives ─────────────────────────
-        # Query Atlas to find providers for lidar/imu/camera, negotiate
-        # channels, and resolve ROS2 topic names for each.
         primitive_topics = _discover_all_primitives(stub, node_id)
 
     except Exception as e:
         log.warning("Atlas registration/discovery failed: %s (using fallback topics)", e)
-        # Use fallback topics if Atlas is unavailable
         for contract_id, info in _CONSUMED_PRIMITIVES.items():
             primitive_topics[contract_id] = info["fallback_topic"]
 
@@ -617,11 +642,11 @@ def _run_grpc_server(port: int):
     server.start()
     log.info("gRPC data-plane on 0.0.0.0:%d", port)
     log.info("  PrmBaseOdom.Stream        (robonix/prm/base/odom)")
-    log.info("  SysSlamStatus.Call        (robonix/sys/slam/status)")
-    log.info("  SysSlamSaveMap.Call       (robonix/sys/slam/save_map)")
-    log.info("  SysSlamLoadMap.Call       (robonix/sys/slam/load_map)")
-    log.info("  SysSlamSwitchMode.Call    (robonix/sys/slam/switch_mode)")
-    log.info("  SysSlamSetInitialPose.Call(robonix/sys/slam/set_initial_pose)")
+    log.info("  SysSlamStatus.Call        (robonix/srv/slam/status)")
+    log.info("  SysSlamSaveMap.Call       (robonix/srv/slam/save_map)")
+    log.info("  SysSlamLoadMap.Call       (robonix/srv/slam/load_map)")
+    log.info("  SysSlamSwitchMode.Call    (robonix/srv/slam/switch_mode)")
+    log.info("  SysSlamSetInitialPose.Call(robonix/srv/slam/set_initial_pose)")
     return server
 
 

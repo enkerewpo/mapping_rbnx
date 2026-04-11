@@ -1,16 +1,12 @@
-# Jetson overlay — uses Jetson-specific base image and runtime
+# Jetson overlay — uses L4T-based image for JetPack compatibility
 services:
-  fast-livo2:
+  fastlio2:
     build:
       dockerfile: docker/Dockerfile.jetson
     image: mapping_rbnx:jetson
-    runtime: nvidia
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+
+  atlas-bridge:
+    build:
+      dockerfile: docker/Dockerfile.jetson
+      target: runtime
+    image: mapping_rbnx:jetson

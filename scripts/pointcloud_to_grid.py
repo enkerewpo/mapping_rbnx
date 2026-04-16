@@ -116,8 +116,53 @@ class PC2Grid(Node):
         occ = np.full(self.log.shape, -1, dtype=np.int8)
         occ[self.log <= L_FREE_THR] = 0
         occ[self.log >= L_OCC_THR] = 100
+
+        # --- Morphological post-processing to clean salt-and-pepper noise ---
+        # OPEN (erode ∘ dilate) on the occupied mask removes isolated occupied
+        # speckles (dynamic objects, sensor noise); CLOSE (dilate ∘ erode)
+        # fills 1-cell gaps in walls. Kernels are tiny (3x3) so we don't
+        # distort real geometry. Unknown cells (-1) are preserved.
+        occ = _morph_cleanup(occ)
+
         g.data = occ.flatten().tolist()
         self.pub.publish(g)
+
+
+def _morph_cleanup(occ):
+    """3x3 OPEN on occupied + CLOSE on occupied, preserving unknown cells.
+
+    Pure numpy so we don't add scipy/cv2 to the runtime. Operates on the
+    (height, width) int8 grid with values {-1 unknown, 0 free, 100 occupied}.
+    """
+    occ_mask = occ == 100
+    # 3x3 dilation (OR shifted copies)
+    def _dilate(m):
+        up    = np.zeros_like(m); up[:-1, :]    = m[1:, :]
+        down  = np.zeros_like(m); down[1:, :]   = m[:-1, :]
+        left  = np.zeros_like(m); left[:, :-1]  = m[:, 1:]
+        right = np.zeros_like(m); right[:, 1:]  = m[:, :-1]
+        return m | up | down | left | right
+
+    def _erode(m):
+        up    = np.ones_like(m);  up[:-1, :]    = m[1:, :]
+        down  = np.ones_like(m);  down[1:, :]   = m[:-1, :]
+        left  = np.ones_like(m);  left[:, :-1]  = m[:, 1:]
+        right = np.ones_like(m);  right[:, 1:]  = m[:, :-1]
+        return m & up & down & left & right
+
+    # OPEN: remove isolated occupied cells
+    opened = _dilate(_erode(occ_mask))
+    # CLOSE: fill pinhole gaps inside walls
+    closed = _erode(_dilate(opened))
+
+    out = occ.copy()
+    # Cells that the open pass removed and were not still confident → become free
+    removed = occ_mask & (~opened)
+    out[removed] = 0
+    # Cells that the close pass added (were free or unknown but surrounded) → occupied
+    added = closed & (~occ_mask)
+    out[added & (out != -1)] = 100  # don't overwrite unknown cells
+    return out
 
 
 def main():

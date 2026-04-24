@@ -29,7 +29,7 @@ class CloudAcc(Node):
         self.lock_at = int(os.environ.get("CLOUD_ACC_LOCK_AT", "30"))
         self.decay_frames = int(os.environ.get("CLOUD_ACC_DECAY_FRAMES", "50"))
         self.decay_range_m = float(os.environ.get("CLOUD_ACC_DECAY_RANGE_M", "8.0"))
-        self.frame = "lidar"
+        self.frame = os.environ.get("MAPPING_OUTPUT_FRAME", "lidar")
         # voxel_key -> [hits, x_mean, y_mean, z_mean, last_seen_scan_idx]
         self.voxels = {}
         self.scan_idx = 0
@@ -43,10 +43,10 @@ class CloudAcc(Node):
             PointCloud2, "/robonix/map/cloud_accumulated", latched
         )
         self.create_subscription(
-            PointCloud2, "/fastlio2/world_cloud", self.cb, 10
+            PointCloud2, os.environ.get("MAPPING_CLOUD_TOPIC", "/fastlio2/world_cloud"), self.cb, 10
         )
         self.create_subscription(
-            Odometry, "/fastlio2/lio_odom", self.odom_cb, 20
+            Odometry, os.environ.get("MAPPING_ODOM_TOPIC", "/fastlio2/lio_odom"), self.odom_cb, 20
         )
         self.create_timer(1.0, self.publish)
         # decay runs every CLOUD_ACC_DECAY_FRAMES/10 seconds (since scans
@@ -143,11 +143,27 @@ class CloudAcc(Node):
     def publish(self):
         if not self.voxels:
             return
-        pts = np.array(
-            [(v[1], v[2], v[3]) for v in self.voxels.values()
-             if v[0] >= self.min_hits],
-            dtype=np.float32,
-        )
+        # Range-aware min_hits: inside decay_range_m we enforce min_hits to
+        # filter dynamic objects (people/carts); outside we cant get enough
+        # hits on a fast pass so we accept single-hit voxels — theyre in
+        # the no-decay zone anyway (trusted-once-seen).
+        if self.robot_xyz is not None and self.min_hits > 1:
+            rx, ry, rz = self.robot_xyz
+            r2 = self.decay_range_m ** 2
+            kept = []
+            for v in self.voxels.values():
+                if v[0] >= self.min_hits:
+                    kept.append((v[1], v[2], v[3])); continue
+                dx = v[1]-rx; dy = v[2]-ry; dz = v[3]-rz
+                if dx*dx + dy*dy + dz*dz > r2:
+                    kept.append((v[1], v[2], v[3]))
+            pts = np.array(kept, dtype=np.float32) if kept else np.empty((0,3), np.float32)
+        else:
+            pts = np.array(
+                [(v[1], v[2], v[3]) for v in self.voxels.values()
+                 if v[0] >= self.min_hits],
+                dtype=np.float32,
+            )
         if pts.size == 0:
             return
         msg = PointCloud2()

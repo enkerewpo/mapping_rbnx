@@ -23,7 +23,7 @@ class PC2Grid(Node):
         self.zmin = -0.2
         self.zmax = 0.8
         self.min_range = 0.3    # robot footprint / lidar blind zone only
-        self.frame = 'lidar'
+        self.frame = os.environ.get('MAPPING_OUTPUT_FRAME', 'lidar')
         self.max_range_m = self.size_m / 2.0 - self.res
         self.n = int(self.size_m / self.res)
         self.half = self.size_m / 2.0
@@ -33,8 +33,8 @@ class PC2Grid(Node):
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                              reliability=ReliabilityPolicy.RELIABLE)
         self.pub = self.create_publisher(OccupancyGrid, '/robonix/map/occupancy_grid', latched)
-        self.create_subscription(PointCloud2, '/fastlio2/world_cloud', self.cb, 10)
-        self.create_subscription(Odometry, '/fastlio2/lio_odom', self.odom_cb, 50)
+        self.create_subscription(PointCloud2, os.environ.get("MAPPING_CLOUD_TOPIC", "/fastlio2/world_cloud"), self.cb, 10)
+        self.create_subscription(Odometry, os.environ.get("MAPPING_ODOM_TOPIC", "/fastlio2/lio_odom"), self.odom_cb, 50)
         self.create_timer(0.5, self.publish)
         self.get_logger().info(
             f'PC2Grid log-odds: {self.n}x{self.n} z=[{self.zmin},{self.zmax}] '

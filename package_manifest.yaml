@@ -32,6 +32,12 @@
 # of which algo is selected; consumers care about contracts, not algos):
 #   robonix/service/map/occupancy_grid → nav_msgs/OccupancyGrid
 #   robonix/service/map/pointcloud     → sensor_msgs/PointCloud2
+#   robonix/service/map/pose           → geometry_msgs/PoseWithCovarianceStamped
+#                                        (SLAM-corrected, map frame, can
+#                                         jump on loop closure)
+#   robonix/service/map/odom           → nav_msgs/Odometry
+#                                        (SLAM-corrected, odom frame,
+#                                         continuous between closures)
 # Algos that don't natively publish a contract spawn an adapter node
 # in their launch file so the topic still exists at the bound name.
 manifestVersion: 1
@@ -55,3 +61,5 @@ start: bash scripts/start.sh
 capabilities:
   - name: robonix/service/map/occupancy_grid
   - name: robonix/service/map/pointcloud
+  - name: robonix/service/map/pose
+  - name: robonix/service/map/odom

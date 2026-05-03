@@ -91,6 +91,14 @@ def _load_manifest_config() -> dict:
 _EXPORTED_CONTRACTS: tuple[str, ...] = (
     "robonix/service/map/occupancy_grid",
     "robonix/service/map/pointcloud",
+    # SLAM-corrected map-frame pose (loop-closed; can jump on closure).
+    # Consumed by scene self-tracker / nav / explore so they don't fall
+    # back to raw chassis odom.
+    "robonix/service/map/pose",
+    # SLAM-corrected continuous odom (frame: odom, smooth between loop
+    # closures). For high-rate velocity controllers and trajectory
+    # tracking that can't tolerate the jumps in /map/pose.
+    "robonix/service/map/odom",
 )
 
 # Per-algo: which internal ROS topic backs each exported contract.
@@ -104,6 +112,16 @@ _ALGO_TOPIC_BINDINGS: dict[str, dict[str, str]] = {
         # occlusion layer).
         "robonix/service/map/occupancy_grid": "/map",
         "robonix/service/map/pointcloud":     "/rtabmap/cloud_map",
+        # /rtabmap/localization_pose: PoseWithCovarianceStamped in map
+        # frame. Published by rtabmap on every map update (so it's the
+        # post-loop-closure pose). When rtabmap runs in mapping mode
+        # it also publishes it after each map node.
+        "robonix/service/map/pose":           "/rtabmap/localization_pose",
+        # /rtabmap/odom: continuous odometry. When external odom is
+        # supplied, rtabmap republishes it under this name with the
+        # same map→odom correction baked in via /tf. When icp_odometry
+        # is running internally, this IS the odom source.
+        "robonix/service/map/odom":           "/rtabmap/odom",
     },
     "dlio": {
         # Direct LiDAR-Inertial Odometry: real-robot 3D livox path.
@@ -111,11 +129,19 @@ _ALGO_TOPIC_BINDINGS: dict[str, dict[str, str]] = {
         # by a pointcloud_to_grid adapter spawned in the launch.
         "robonix/service/map/occupancy_grid": "/robonix/map/occupancy_grid",
         "robonix/service/map/pointcloud":     "/dlio/odom_node/pointcloud/deskewed",
+        # DLIO publishes a single Odometry topic (no separate
+        # loop-closed pose stream). We bind both contracts to it; the
+        # docstring on /map/pose notes "can jump on closure" but DLIO
+        # has no loop closure so it never jumps anyway.
+        "robonix/service/map/pose":           "/dlio/odom_node/pose",
+        "robonix/service/map/odom":           "/dlio/odom_node/odom",
     },
     "fastlio2": {
         # [BROKEN: drift] same shape as dlio, kept for repro only.
         "robonix/service/map/occupancy_grid": "/robonix/map/occupancy_grid",
         "robonix/service/map/pointcloud":     "/fastlio2/world_cloud",
+        "robonix/service/map/pose":           "/fastlio2/lio_odom",
+        "robonix/service/map/odom":           "/fastlio2/lio_odom",
     },
 }
 

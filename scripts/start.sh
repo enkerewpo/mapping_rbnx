@@ -71,6 +71,6 @@ exec docker run --rm \
     -e MAPPING_ENABLE_VIZ="${MAPPING_ENABLE_VIZ:-true}" \
     "${X11_ARGS[@]}" \
     -v "$(pwd)":/mapping \
-    -v "$(rbnx path robonix-py)":/robonix-py:ro \
+    -v "$(rbnx path robonix-api)":/robonix-api:ro \
     "${EXTRA_MOUNTS[@]}" \
     "$IMG"

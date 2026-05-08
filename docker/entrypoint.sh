@@ -28,8 +28,8 @@ cd /mapping
 # (`rbnx codegen` writes <pkg>/proto_gen/). atlas_bridge needs the
 # generated atlas_pb2 etc., so prepend it.
 export PYTHONPATH="/mapping/src:/mapping/proto_gen:${PYTHONPATH:-}"
-if [ -d /robonix-py ]; then
-    export PYTHONPATH="/robonix-py:${PYTHONPATH}"
+if [ -d /robonix-api ]; then
+    export PYTHONPATH="/robonix-api:${PYTHONPATH}"
 fi
 
 mkdir -p /mapping/rbnx-build/data

@@ -24,10 +24,11 @@ source /opt/ros/humble/setup.bash
 
 cd /mapping
 
-# Codegen output (proto_gen) is at the package root by default
-# (`rbnx codegen` writes <pkg>/proto_gen/). atlas_bridge needs the
-# generated atlas_pb2 etc., so prepend it.
-export PYTHONPATH="/mapping/src:/mapping/proto_gen:${PYTHONPATH:-}"
+# Codegen output lives under <pkg>/rbnx-build/codegen/ per v0.1 (matches
+# `rbnx codegen` default + `robonix_api.codegen.ensure_proto_gen` walks).
+# atlas_bridge needs the generated atlas_pb2 etc., so prepend the
+# proto_gen + robonix_mcp_types subdirs.
+export PYTHONPATH="/mapping/src:/mapping/rbnx-build/codegen/proto_gen:/mapping/rbnx-build/codegen/robonix_mcp_types:${PYTHONPATH:-}"
 if [ -d /robonix-api ]; then
     export PYTHONPATH="/robonix-api:${PYTHONPATH}"
 fi

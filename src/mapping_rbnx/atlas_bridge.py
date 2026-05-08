@@ -1,20 +1,17 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""mapping_rbnx atlas bridge — new robonix dev-packaging API.
+"""mapping_rbnx atlas bridge — robonix v0.1 Capability flow.
 
 Responsibilities (kept tight; SLAM nodes do the actual work):
-  1. Register `mapping` as a capability with atlas.
-  2. Read the manifest config (RBNX_CONFIG_FILE) to learn:
-       - algo:    rtabmap (2D lidar+RGBD, default for both webots and
-                  real-robot scenarios with 2D scan + RGBD camera)
-                | dlio    (3D LiDAR-Inertial Odometry; primary choice
-                  for real robot with Livox / 3D scanner + IMU)
-                | fastlio2 [BROKEN: drift] (kept reachable for repro;
-                  do NOT pick for production until the global drift
-                  issue is fixed — see open issue tracker)
-       - sensors: lidar2d / lidar3d / rgb / rgbd / imu booleans
+  1. Register `mapping` as a capability with atlas, declare a
+     `service/map/driver` interface.
+  2. Wait for `Driver(CMD_INIT, config_json)` from rbnx — config arrives
+     ONLY through this gRPC channel (NEVER from disk / env). The cfg
+     dict carries:
+       - algo:    rtabmap | dlio | fastlio2[broken]
+       - sensors: lidar2d / lidar3d / rgb / rgbd / imu / odom booleans
        - platform: x86_desktop / jetson_orin
-  3. Resolve sensor primitives via atlas (QueryCapabilities + ConnectCapability),
-     write `/tmp/<algo>_resolved.yaml` for the launch file.
+  3. Resolve sensor primitives via atlas, write `/tmp/<algo>_resolved.yaml`
+     for the launch file (start_engine.sh greps these out).
   4. Declare the algo-appropriate output endpoints on atlas, ALL under
      the SAME contract surface (robonix/service/map/*) so consumers
      (scene, nav) are algo-agnostic.
@@ -26,11 +23,9 @@ for the cost of one extra dependency.
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 import sys
-import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -48,6 +43,8 @@ import grpc  # noqa: E402
 import atlas_pb2 as pb  # type: ignore
 import atlas_pb2_grpc as pb_grpc  # type: ignore
 
+from robonix_api import Capability  # noqa: E402
+
 
 # ── Config ────────────────────────────────────────────────────────────────────
 ATLAS_ENDPOINT = os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051")
@@ -60,20 +57,6 @@ HEARTBEAT_PERIOD_S = 10.0
 
 def _truthy(s: str) -> bool:
     return str(s).strip().lower() in ("1", "true", "yes", "on")
-
-
-def _load_manifest_config() -> dict:
-    """Parse RBNX_CONFIG_FILE (json from rbnx) into a dict.
-    Returns {} when unset / unreadable — defaults are applied later."""
-    path = os.environ.get("RBNX_CONFIG_FILE", "")
-    if not path or not os.path.isfile(path):
-        return {}
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except Exception as e:  # noqa: BLE001
-        log.warning("RBNX_CONFIG_FILE unreadable (%s): %s — using defaults", path, e)
-        return {}
 
 
 # ── Per-algo output endpoint map ──────────────────────────────────────────────
@@ -208,100 +191,40 @@ def _enabled_sensors(cfg: dict) -> dict:
     return out
 
 
-# ── Atlas client helpers ──────────────────────────────────────────────────────
-def _atlas_stub() -> pb_grpc.AtlasStub:
-    chan = grpc.insecure_channel(ATLAS_ENDPOINT)
-    return pb_grpc.AtlasStub(chan)
-
-
-def _register_self(stub) -> None:
-    """RegisterCapability with atlas. Idempotent on re-deploy: atlas
-    rejects duplicates with ALREADY_EXISTS, which we treat as a soft
-    success (re-using an existing instance)."""
-    try:
-        stub.RegisterCapability(pb.RegisterCapabilityRequest(
-            capability_id=CAP_ID,
-            namespace=NAMESPACE,
-            capability_md_path=str(Path(PKG_HOST_DIR) / "CAPABILITY.md") if (Path(PKG_HOST_DIR) / "CAPABILITY.md").exists() else "",
-        ))
-        log.info("registered cap %s namespace=%s", CAP_ID, NAMESPACE)
-    except grpc.RpcError as e:
-        if e.code() == grpc.StatusCode.ALREADY_EXISTS:
-            log.info("cap %s already registered (re-deploy); reusing", CAP_ID)
-        else:
-            raise
-
-
-def _declare_outputs(stub, algo: str) -> None:
-    """DeclareInterface(transport=ROS2) for every exported contract.
-    All algos publish the same contract surface — only the underlying
-    ROS topic differs — so consumers never need to know which algo
-    is running."""
-    bindings = _ALGO_TOPIC_BINDINGS[algo]
-    declared = 0
-    for contract_id in _EXPORTED_CONTRACTS:
-        topic = bindings[contract_id]
-        try:
-            stub.DeclareInterface(pb.DeclareInterfaceRequest(
-                capability_id=CAP_ID,
-                contract_id=contract_id,
-                transport=pb.TRANSPORT_ROS2,
-                endpoint=topic,
-                params=pb.TransportParams(
-                    ros2=pb.Ros2Params(qos_profile="reliable"),
-                ),
-            ))
-            declared += 1
-            log.info("declared %s → ROS2 topic %s", contract_id, topic)
-        except grpc.RpcError as e:
-            if e.code() == grpc.StatusCode.ALREADY_EXISTS:
-                log.info("%s already declared (re-deploy); ok", contract_id)
-            else:
-                log.warning("declare %s failed: %s", contract_id, e)
-    log.info("declared %d/%d output(s) for algo=%s",
-             declared, len(_EXPORTED_CONTRACTS), algo)
-
-
-def _resolve_sensor_endpoint(stub, contract_id: str) -> Optional[str]:
-    """QueryCapabilities for the contract over ROS2; if found,
-    ConnectCapability to read the endpoint (atlas only discloses
-    endpoints after a Connect)."""
-    try:
-        resp = stub.QueryCapabilities(pb.QueryCapabilitiesRequest(
-            contract_id=contract_id,
-            transport=pb.TRANSPORT_ROS2,
-        ))
-    except grpc.RpcError as e:
-        log.warning("query %s failed: %s", contract_id, e)
+# ── Atlas helpers (use Capability's wrapped stub) ────────────────────────────
+def _resolve_sensor_endpoint(cap: Capability, contract_id: str) -> Optional[str]:
+    """find_one + connect for one ROS2 contract. Returns the topic
+    string atlas resolved, or None when no provider is online yet.
+    The opened Channel is closed immediately — we just want the
+    endpoint string, atlas's bookkeeping for "I'm consuming this"
+    is the side benefit."""
+    rec = cap.find_one(contract_id=contract_id, transport="ros2")
+    if rec is None:
         return None
-    for rec in resp.records:
-        for iface in rec.interfaces:
-            if iface.contract_id != contract_id or iface.transport != pb.TRANSPORT_ROS2:
-                continue
-            try:
-                conn = stub.ConnectCapability(pb.ConnectCapabilityRequest(
-                    consumer_id=CAP_ID,
-                    capability_id=rec.capability_id,
-                    contract_id=contract_id,
-                    transport=pb.TRANSPORT_ROS2,
-                ))
-                if conn.endpoint:
-                    return conn.endpoint
-            except grpc.RpcError as e:
-                log.warning("connect %s failed: %s", contract_id, e)
-    return None
+    try:
+        ch = cap.connect(
+            contract_id=contract_id,
+            transport="ros2",
+            capability_id=rec.capability_id,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("connect %s/%s failed: %s", rec.capability_id, contract_id, e)
+        return None
+    endpoint = (ch.endpoint or "").strip()
+    ch.close()
+    return endpoint or None
 
 
-def _resolve_sensors(stub, cfg: dict) -> dict[str, str]:
-    """For each enabled sensor, ask atlas for the topic. Falls back
-    to no-key when the primitive isn't online yet (resolved.yaml will
-    still be useful — launch picks a sane default)."""
+def _resolve_sensors(cap: Capability, cfg: dict) -> dict[str, str]:
+    """For each enabled sensor, ask atlas for the topic. Empty when
+    the primitive isn't online yet (resolved.yaml still useful — the
+    launch picks a sane default)."""
     enabled = _enabled_sensors(cfg)
     resolved: dict[str, str] = {}
     for cfg_key, contract_id, yaml_key in _SENSOR_CONTRACTS:
         if not enabled.get(cfg_key):
             continue
-        ep = _resolve_sensor_endpoint(stub, contract_id)
+        ep = _resolve_sensor_endpoint(cap, contract_id)
         if ep:
             resolved[yaml_key] = ep
             log.info("resolved %s → %s = %s", contract_id, yaml_key, ep)
@@ -310,14 +233,14 @@ def _resolve_sensors(stub, cfg: dict) -> dict[str, str]:
     return resolved
 
 
-def _retry_resolve(stub, cfg: dict, deadline_s: float = 30.0,
+def _retry_resolve(cap: Capability, cfg: dict, deadline_s: float = 30.0,
                    settle_s: float = 8.0) -> dict[str, str]:
-    """Same retry+settle pattern as scene: wait until at least one
-    sensor lands, then keep absorbing late arrivers for `settle_s`."""
+    """Wait until at least one sensor lands, then absorb late arrivals
+    for `settle_s` so all enabled inputs end up in resolved.yaml."""
     deadline = time.time() + deadline_s
     resolved: dict[str, str] = {}
     while time.time() < deadline:
-        resolved = _resolve_sensors(stub, cfg)
+        resolved = _resolve_sensors(cap, cfg)
         if resolved:
             break
         time.sleep(2.0)
@@ -327,11 +250,28 @@ def _retry_resolve(stub, cfg: dict, deadline_s: float = 30.0,
     settle_until = time.time() + settle_s
     while time.time() < settle_until:
         time.sleep(2.0)
-        more = _resolve_sensors(stub, cfg)
+        more = _resolve_sensors(cap, cfg)
         if len(more) > len(resolved):
             log.info("sensor-resolve settle: %d → %d", len(resolved), len(more))
             resolved = more
     return resolved
+
+
+def _declare_outputs(cap: Capability, algo: str) -> None:
+    """DeclareInterface(transport=ROS2) for every exported contract.
+    All algos publish the same contract surface — only the topic differs."""
+    bindings = _ALGO_TOPIC_BINDINGS[algo]
+    declared = 0
+    for contract_id in _EXPORTED_CONTRACTS:
+        topic = bindings[contract_id]
+        try:
+            cap.declare_ros2(contract_id, topic, qos_profile="reliable")
+            declared += 1
+            log.info("declared %s → ROS2 topic %s", contract_id, topic)
+        except Exception as e:  # noqa: BLE001
+            log.warning("declare %s failed: %s", contract_id, e)
+    log.info("declared %d/%d output(s) for algo=%s",
+             declared, len(_EXPORTED_CONTRACTS), algo)
 
 
 def _write_resolved_yaml(algo: str, resolved: dict[str, str]) -> str:
@@ -352,63 +292,57 @@ def _write_resolved_yaml(algo: str, resolved: dict[str, str]) -> str:
     return out
 
 
-# ── Main loop ─────────────────────────────────────────────────────────────────
-def _heartbeat_loop(stub) -> None:
-    """Atlas evicts caps that don't heartbeat for 60s. Send every 10s."""
-    while True:
-        try:
-            stub.Heartbeat(pb.HeartbeatRequest(capability_id=CAP_ID))
-        except Exception:
-            pass
-        time.sleep(HEARTBEAT_PERIOD_S)
+# ── Capability + lifecycle ────────────────────────────────────────────────────
+cap = Capability(id=CAP_ID, namespace=NAMESPACE, atlas_endpoint=ATLAS_ENDPOINT)
 
 
-def main() -> int:
-    cfg = _load_manifest_config()
+@cap.on_init
+def init(cfg: dict):
+    """REGISTERED → INITIALIZED. Receives the config dict from
+    rbnx via Driver(CMD_INIT, config_json). The mapping cap NEVER reads
+    config from disk / env — this gRPC channel is the only sanctioned
+    delivery path.
+
+    Order:
+      1. Validate algo + sensors block.
+      2. Persist algo for start_engine.sh (it greps /tmp/mapping_algo).
+      3. Resolve enabled sensor topics from atlas (with retry+settle —
+         primitives may still be warming up when CMD_INIT lands).
+      4. Write /tmp/<algo>_resolved.yaml for the launch file.
+      5. DeclareInterface(ROS2) for every exported map output.
+    """
     algo = cfg.get("algo", "rtabmap")
     if algo not in _ALGO_TOPIC_BINDINGS:
-        log.error("unknown algo %r — supported: %s",
-                  algo, list(_ALGO_TOPIC_BINDINGS))
-        return 2
-    _check_binding_complete(algo)
+        return cap.error(
+            f"unknown algo {algo!r} — supported: {list(_ALGO_TOPIC_BINDINGS)}"
+        )
+    try:
+        _check_binding_complete(algo)
+    except RuntimeError as e:
+        return cap.error(str(e))
     if algo == "fastlio2":
         log.warning("algo=fastlio2 is BROKEN (drift); use only for repro/debug")
 
-    log.info("starting bridge: algo=%s atlas=%s cap=%s",
-             algo, ATLAS_ENDPOINT, CAP_ID)
+    log.info("CMD_INIT: algo=%s atlas=%s cap=%s", algo, ATLAS_ENDPOINT, CAP_ID)
 
     # Persist algo for start_engine.sh.
     os.environ["MAPPING_ALGO"] = algo
     Path("/tmp/mapping_algo").write_text(algo)
 
-    # Reach atlas (with brief retry — atlas may have just started).
-    stub = _atlas_stub()
-    for _ in range(10):
-        try:
-            stub.RegisterCapability(pb.RegisterCapabilityRequest(
-                capability_id=CAP_ID, namespace=NAMESPACE, capability_md_path=""))
-            break
-        except grpc.RpcError as e:
-            if e.code() == grpc.StatusCode.ALREADY_EXISTS:
-                break
-            time.sleep(1.0)
-    log.info("registered cap %s", CAP_ID)
-
-    # Discover sensors → resolved.yaml.
-    resolved = _retry_resolve(stub, cfg)
+    # Discover sensors → resolved.yaml. Raises if `sensors:` block missing.
+    try:
+        resolved = _retry_resolve(cap, cfg)
+    except RuntimeError as e:
+        return cap.error(str(e))
     _write_resolved_yaml(algo, resolved)
 
     # Declare outputs (after resolved.yaml so launch can start in parallel).
-    _declare_outputs(stub, algo)
+    _declare_outputs(cap, algo)
+    return cap.ready()
 
-    # Heartbeat forever — exit only on signal.
-    threading.Thread(target=_heartbeat_loop, args=(stub,), daemon=True).start()
-    log.info("atlas_bridge ready; idling on heartbeat")
-    try:
-        while True:
-            time.sleep(60.0)
-    except KeyboardInterrupt:
-        log.info("interrupted; shutting down")
+
+def main() -> int:
+    cap.run()
     return 0
 
 

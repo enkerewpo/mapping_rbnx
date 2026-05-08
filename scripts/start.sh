@@ -26,9 +26,10 @@ docker rm -f "$CT" >/dev/null 2>&1 || true
 mkdir -p rbnx-build/data
 
 declare -a EXTRA_MOUNTS=()
-if [[ -n "${RBNX_CONFIG_FILE:-}" ]]; then
-    EXTRA_MOUNTS+=(-v "${RBNX_CONFIG_FILE}:${RBNX_CONFIG_FILE}:ro")
-fi
+# NOTE: RBNX_CONFIG_FILE intentionally NOT mounted/forwarded. Per v0.1
+# layering, the cap receives its config exclusively through
+# Driver(CMD_INIT, config_json), driven by rbnx boot/start over gRPC.
+# The cap process must never see the config file path.
 
 # X11 forwarding for rtabmap_viz inside the mapping container. We
 # auto-detect DISPLAY when it's not in the env (the user ran
@@ -65,7 +66,6 @@ exec docker run --rm \
     -e ROBONIX_ATLAS="${ROBONIX_ATLAS:-127.0.0.1:50051}" \
     -e ROBONIX_CAPABILITY_ID="${ROBONIX_CAPABILITY_ID:-mapping}" \
     -e ROBONIX_PKG_HOST_DIR="$(pwd)" \
-    -e RBNX_CONFIG_FILE="${RBNX_CONFIG_FILE:-}" \
     -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \
     -e MAPPING_GRPC_PORT="${MAPPING_GRPC_PORT:-50120}" \
     -e MAPPING_ENABLE_VIZ="${MAPPING_ENABLE_VIZ:-true}" \

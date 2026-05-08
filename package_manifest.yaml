@@ -59,6 +59,7 @@ start: bash scripts/start.sh
 # moment any of those gRPC services is implemented, add it back AND
 # wire the DeclareInterface call in atlas_bridge.
 capabilities:
+  - name: robonix/service/map/driver
   - name: robonix/service/map/occupancy_grid
   - name: robonix/service/map/pointcloud
   - name: robonix/service/map/pose

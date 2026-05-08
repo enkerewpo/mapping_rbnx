@@ -43,7 +43,7 @@
 manifestVersion: 1
 
 package:
-  name: mapping
+  name: com.robonix.service.mapping
   version: 0.4.0
   vendor: robonix
   description: SLAM mapping service. Algo + sensor inputs config-driven.

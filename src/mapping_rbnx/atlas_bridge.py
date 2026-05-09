@@ -275,11 +275,17 @@ def _write_resolved_yaml(algo: str, resolved: dict[str, str]) -> str:
     """Write /tmp/<algo>_resolved.yaml with k=v lines. start_engine.sh
     `grep`s these out — yaml-lite is fine, no parser needed."""
     out = os.path.join(RESOLVED_DIR, f"{algo}_resolved.yaml")
-    # tf frames default for webots tiago
+    # tf frames default for webots tiago. Real-robot deploys without a
+    # base_link TF (no chassis driver, no soma URDF yet) override
+    # base_frame to the lidar's own frame (e.g. livox_frame for MID-360)
+    # via cfg in the deploy manifest. use_sim_time follows the same
+    # cfg path so real-robot bring-ups don't get stuck waiting for a
+    # /clock that never comes.
     defaults = {
         "base_frame": "base_link",
         "odom_frame": "odom",
         "map_frame": "map",
+        "use_sim_time": "true",
     }
     merged = {**defaults, **resolved}
     with open(out, "w") as f:
@@ -331,6 +337,12 @@ def init(cfg: dict):
         resolved = _retry_resolve(cap, cfg)
     except RuntimeError as e:
         return Err(str(e))
+    # TF / time-source overrides from cfg. Real-robot bring-ups without
+    # a chassis driver pass base_frame=livox_frame so rtabmap doesn't
+    # block waiting for base_link. use_sim_time=false on real hardware.
+    for key in ("base_frame", "odom_frame", "map_frame", "use_sim_time"):
+        if key in cfg:
+            resolved[key] = str(cfg[key]).lower() if key == "use_sim_time" else str(cfg[key])
     _write_resolved_yaml(algo, resolved)
 
     # Declare outputs (after resolved.yaml so launch can start in parallel).

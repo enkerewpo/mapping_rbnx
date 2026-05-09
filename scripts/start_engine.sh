@@ -53,15 +53,26 @@ case "$ALGO" in
         ODOM_TOPIC="${ODOM_TOPIC:-<none>}"
         RGB_TOPIC="${RGB_TOPIC:-<none>}"
         DEPTH_TOPIC="${DEPTH_TOPIC:-<none>}"
-        USE_SIM_TIME="${MAPPING_USE_SIM_TIME:-true}"
+        # tf + time-source from atlas_bridge's resolved.yaml (cfg-driven
+        # in the deploy manifest); fall back to legacy env / defaults.
+        # Real-robot bring-ups without a chassis TF override base_frame
+        # to the lidar's own frame so rtabmap doesn't block on base_link.
+        BASE_FRAME=$(read_y base_frame)
+        ODOM_FRAME=$(read_y odom_frame)
+        USE_SIM_TIME_R=$(read_y use_sim_time)
+        BASE_FRAME="${BASE_FRAME:-base_link}"
+        ODOM_FRAME="${ODOM_FRAME:-odom}"
+        USE_SIM_TIME="${USE_SIM_TIME_R:-${MAPPING_USE_SIM_TIME:-true}}"
         ENABLE_VIZ="${MAPPING_ENABLE_VIZ:-false}"
-        echo "[start_engine] rtabmap scan2d=$SCAN_TOPIC scan3d=$SCAN_CLOUD_TOPIC odom=$ODOM_TOPIC rgb=$RGB_TOPIC depth=$DEPTH_TOPIC viz=$ENABLE_VIZ"
+        echo "[start_engine] rtabmap scan2d=$SCAN_TOPIC scan3d=$SCAN_CLOUD_TOPIC odom=$ODOM_TOPIC rgb=$RGB_TOPIC depth=$DEPTH_TOPIC base=$BASE_FRAME odomf=$ODOM_FRAME use_sim_time=$USE_SIM_TIME viz=$ENABLE_VIZ"
         exec ros2 launch /mapping/launch/rtabmap_2d.launch.py \
             scan_topic:="$SCAN_TOPIC" \
             scan_cloud_topic:="$SCAN_CLOUD_TOPIC" \
             odom_topic:="$ODOM_TOPIC" \
             rgb_topic:="$RGB_TOPIC" \
             depth_topic:="$DEPTH_TOPIC" \
+            base_frame:="$BASE_FRAME" \
+            odom_frame:="$ODOM_FRAME" \
             use_sim_time:="$USE_SIM_TIME" \
             enable_viz:="$ENABLE_VIZ"
         ;;

@@ -43,7 +43,7 @@ import grpc  # noqa: E402
 import atlas_pb2 as pb  # type: ignore
 import atlas_pb2_grpc as pb_grpc  # type: ignore
 
-from robonix_api import Capability, Ok, Err, Deferred  # noqa: E402
+from robonix_api import Capability, Ok, Err, Deferred, atlas  # noqa: E402
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -193,20 +193,17 @@ def _enabled_sensors(cfg: dict) -> dict:
 
 # ── Atlas helpers (use Capability's wrapped stub) ────────────────────────────
 def _resolve_sensor_endpoint(cap: Capability, contract_id: str) -> Optional[str]:
-    """find_one + connect for one ROS2 contract. Returns the topic
+    """atlas.find + cap.connect for one ROS2 contract. Returns the topic
     string atlas resolved, or None when no provider is online yet.
     The opened Channel is closed immediately — we just want the
     endpoint string, atlas's bookkeeping for "I'm consuming this"
     is the side benefit."""
-    rec = cap.find_one(contract_id=contract_id, transport="ros2")
-    if rec is None:
+    recs = atlas.find(contract_id=contract_id, transport="ros2")
+    if not recs:
         return None
+    rec = recs[0]
     try:
-        ch = cap.connect(
-            contract_id=contract_id,
-            transport="ros2",
-            capability_id=rec.capability_id,
-        )
+        ch = cap.connect(provider=rec, contract_id=contract_id, transport="ros2")
     except Exception as e:  # noqa: BLE001
         log.warning("connect %s/%s failed: %s", rec.capability_id, contract_id, e)
         return None

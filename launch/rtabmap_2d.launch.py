@@ -114,11 +114,9 @@ def _make_nodes(context, *args, **kwargs):
         "wait_for_transform": 1.5,
         # Build occupancy grid from BOTH scan and depth — depth fills in
         # obstacles below the lidar plane (tables, chairs) that the 2D
-        # scan misses entirely. rtabmap docs: Grid/Sensor 0=laser only,
-        # 1=depth only, 2=both. Comment in earlier rev claimed "1=both"
-        # which is wrong — that produced an empty /map when robot was
-        # stationary because depth alone needs a usable TF chain.
-        "Grid/Sensor": "0" if have_scan and not have_rgbd else "2",
+        # scan misses entirely. RTAB-Map 0.21+: scan goes into grid via
+        # subscribe_scan, depth via Grid/FromDepth + Grid/Sensor=1.
+        "Grid/Sensor": "1",
         "Grid/FromDepth": "true" if have_rgbd else "false",
         "Grid/RangeMax": "8.0",
         "Grid/CellSize": "0.05",

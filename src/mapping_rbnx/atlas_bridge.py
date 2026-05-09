@@ -43,7 +43,7 @@ import grpc  # noqa: E402
 import atlas_pb2 as pb  # type: ignore
 import atlas_pb2_grpc as pb_grpc  # type: ignore
 
-from robonix_api import Capability  # noqa: E402
+from robonix_api import Capability, Ok, Err, Deferred  # noqa: E402
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -313,13 +313,13 @@ def init(cfg: dict):
     """
     algo = cfg.get("algo", "rtabmap")
     if algo not in _ALGO_TOPIC_BINDINGS:
-        return cap.error(
+        return Err(
             f"unknown algo {algo!r} — supported: {list(_ALGO_TOPIC_BINDINGS)}"
         )
     try:
         _check_binding_complete(algo)
     except RuntimeError as e:
-        return cap.error(str(e))
+        return Err(str(e))
     if algo == "fastlio2":
         log.warning("algo=fastlio2 is BROKEN (drift); use only for repro/debug")
 
@@ -333,12 +333,12 @@ def init(cfg: dict):
     try:
         resolved = _retry_resolve(cap, cfg)
     except RuntimeError as e:
-        return cap.error(str(e))
+        return Err(str(e))
     _write_resolved_yaml(algo, resolved)
 
     # Declare outputs (after resolved.yaml so launch can start in parallel).
     _declare_outputs(cap, algo)
-    return cap.ready()
+    return Ok()
 
 
 def main() -> int:

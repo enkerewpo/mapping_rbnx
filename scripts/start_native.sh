@@ -71,6 +71,12 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Clear stale gate files from a prior aborted boot (rbnx 2026-05-23 patch).
+# Without this, start_native.sh bypasses the bridge-write gate, runs engine
+# on a stale resolved.yaml from a previous run, fails fast, and trap kills
+# the bridge BEFORE rbnx delivers CMD_INIT — Cancelling all calls error.
+rm -f /tmp/mapping_algo /tmp/*_resolved.yaml
+
 # ── 1. atlas_bridge (the cap) ──────────────────────────────────────────
 "$PYBIN" -u -m mapping_rbnx.atlas_bridge 2>&1 | sed 's/^/[bridge] /' &
 ATLAS_PID=$!

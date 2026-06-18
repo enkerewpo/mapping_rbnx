@@ -133,11 +133,15 @@ def _make_nodes(context, *args, **kwargs):
         # obstacles below the lidar plane (tables, chairs) the scan misses.
         "Grid/Sensor": grid_sensor,
         "Grid/FromDepth": "true" if have_rgbd else "false",
-        # Persist a per-node occupancy grid at insertion time. Without it
-        # rtabmap leaves nodes grid-less and only regenerates on demand,
-        # which on the lidar-only path left /map empty (and emitted the
-        # "Make sure parameter RGBD/CreateOccupancyGrid is true" warning).
-        "RGBD/CreateOccupancyGrid": "true",
+        # Persist a per-node occupancy grid at insertion time — ONLY on the
+        # lidar-only path. There, without it, rtabmap leaves nodes grid-less
+        # and /map comes up empty (the "Make sure parameter
+        # RGBD/CreateOccupancyGrid is true" warning). When a depth camera is
+        # present the grid is already built from depth on demand (as before
+        # this change), so forcing per-node grids there is unnecessary and
+        # would additionally publish obstacle/ground clouds (/cloud_obstacles,
+        # /local_grid_*) the deploy doesn't want — keep it off in that case.
+        "RGBD/CreateOccupancyGrid": "false" if have_rgbd else "true",
         "Grid/RangeMax": "6.0",
         "Grid/CellSize": "0.05",
         "Grid/RayTracing": "true",

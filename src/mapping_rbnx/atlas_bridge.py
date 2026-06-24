@@ -8,7 +8,7 @@ Responsibilities (kept tight; SLAM nodes do the actual work):
      ONLY through this gRPC channel (NEVER from disk / env). The cfg
      dict carries:
        - algo:    rtabmap | dlio | fastlio2[broken]
-       - sensors: lidar2d / lidar3d / rgb / rgbd / imu / odom booleans
+       - sensors: lidar2d / lidar3d / rgb / depth / imu / odom booleans
        - platform: x86_desktop / jetson_orin
   3. Resolve sensor primitives via atlas, write `/tmp/<algo>_resolved.yaml`
      for the launch file (start_engine.sh greps these out).
@@ -222,7 +222,7 @@ _SENSOR_CONTRACTS = [
     ("lidar3d",  "robonix/primitive/lidar/lidar3d",       "lidar_topic"),
     ("lidar2d",  "robonix/primitive/lidar/lidar",         "scan_topic"),
     ("imu",      "robonix/primitive/imu/imu",             "imu_topic"),
-    ("rgbd",     "robonix/primitive/camera/depth",        "depth_topic"),
+    ("depth",    "robonix/primitive/camera/depth",        "depth_topic"),
     ("rgb",      "robonix/primitive/camera/rgb",          "rgb_topic"),
     ("odom",     "robonix/primitive/chassis/odom",        "odom_topic"),
 ]
@@ -234,17 +234,17 @@ def _enabled_sensors(cfg: dict) -> dict:
 
     A missing or empty `sensors:` block is a configuration error: the
     operator forgot to declare what the robot has, and silently
-    picking "lidar2d + rgbd" would mask Mid360 deploys (where the
-    correct answer is lidar3d + rgbd) and headless deploys (where the
-    correct answer is rgbd-only). Fail loud instead.
+    picking "lidar2d + depth" would mask Mid360 deploys (where the
+    correct answer is lidar3d + depth) and headless deploys (where the
+    correct answer is depth-only). Fail loud instead.
     """
     sensors = cfg.get("sensors")
     if not isinstance(sensors, dict) or not sensors:
         raise RuntimeError(
             "mapping config has no `sensors:` block. Declare which "
             "sensors the robot has, e.g.:\n"
-            "  sensors: { lidar2d: true, rgbd: true, odom: true }     # webots tiago\n"
-            "  sensors: { lidar3d: true, rgbd: true, odom: true, imu: true }  # mid360 robot\n"
+            "  sensors: { lidar2d: true, depth: true, odom: true }     # webots tiago\n"
+            "  sensors: { lidar3d: true, depth: true, odom: true, imu: true }  # mid360 robot\n"
             "Supported keys: " + ", ".join(k for k, _, _ in _SENSOR_CONTRACTS)
         )
     out = {}

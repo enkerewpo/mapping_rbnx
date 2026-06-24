@@ -7,11 +7,11 @@ resolved.yaml:
 
     sensors.lidar2d=true   → subscribe_scan          (LaserScan)
     sensors.lidar3d=true   → subscribe_scan_cloud    (PointCloud2)
-    sensors.rgb + .rgbd    → subscribe_rgb + _depth  (RGBD fusion)
+    sensors.rgb + .depth   → subscribe_rgb + _depth  (RGB-D fusion)
     sensors.odom=true      → external odom (else rtabmap odometry node)
 
-Webots tiago = lidar2d + rgbd + odom (LaserScan + Astra + diff-drive).
-Real robot  = lidar3d + rgbd + odom + imu (Mid360 + RealSense).
+Webots tiago = lidar2d + rgb + depth + odom (LaserScan + Astra + diff-drive).
+Real robot  = lidar3d + rgb + depth + odom + imu (Mid360 + RealSense).
 
 start_engine.sh reads `/tmp/<algo>_resolved.yaml` and passes each topic
 as a launch arg. Sentinel `<none>` means "this sensor is not in the

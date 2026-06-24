@@ -6,9 +6,9 @@
 #
 # Supported algos:
 #   rtabmap   — Sensor-agnostic graph SLAM. Subscribes to whatever
-#               sensors.* the deploy enabled (lidar2d / lidar3d / rgbd
-#               / odom). Webots tiago = lidar2d + rgbd; real robot
-#               (mid360) = lidar3d + rgbd.
+#               sensors.* the deploy enabled (lidar2d / lidar3d / rgb /
+#               depth / odom). Webots tiago = lidar2d + rgb + depth; real
+#               robot (mid360) = lidar3d + rgb + depth.
 #   dlio      — Direct LiDAR-Inertial Odometry (3D Livox; real robot)
 #   fastlio2  — [BROKEN: drift] kept for repro/debug only
 #
@@ -39,8 +39,8 @@ case "$ALGO" in
         #   odom_topic       ← robonix/primitive/chassis/odom
         #   rgb_topic        ← robonix/primitive/camera/rgb
         #   depth_topic      ← robonix/primitive/camera/depth
-        # Webots tiago = lidar2d + rgbd + odom.
-        # Real robot   = lidar3d + rgbd + odom (+ imu, unused by rtabmap).
+        # Webots tiago = lidar2d + rgb + depth + odom.
+        # Real robot   = lidar3d + rgb + depth + odom (+ imu, unused by rtabmap).
         # Anything not present in resolved.yaml passes through as the
         # `<none>` sentinel and the launch file disables that subscription.
         SCAN_TOPIC=$(read_y scan_topic)
@@ -74,6 +74,12 @@ case "$ALGO" in
         MAP_MODE="${MAP_MODE:-mapping}"
         RESET_MAP="${RESET_MAP:-false}"
         echo "[start_engine] rtabmap persistence: db=${DATABASE_PATH:-<ephemeral>} mode=$MAP_MODE reset=$RESET_MAP"
+        # Only pass database_path when it is set. ros2 launch rejects an
+        # empty `database_path:=` ("malformed launch argument"), so the
+        # ephemeral case (no map_id) must omit the argument entirely and
+        # let the launch file's default ("" → temp db) take over.
+        DB_ARG=()
+        [ -n "$DATABASE_PATH" ] && DB_ARG=(database_path:="$DATABASE_PATH")
         echo "[start_engine] rtabmap scan2d=$SCAN_TOPIC scan3d=$SCAN_CLOUD_TOPIC odom=$ODOM_TOPIC rgb=$RGB_TOPIC depth=$DEPTH_TOPIC imu=$IMU_TOPIC base=$BASE_FRAME odomf=$ODOM_FRAME use_sim_time=$USE_SIM_TIME viz=$ENABLE_VIZ"
         # Run launch in the background so a sidecar can scrape
         # rtabmap_slam's actual --params-file path (the temp file ros2
@@ -92,9 +98,9 @@ case "$ALGO" in
             odom_frame:="$ODOM_FRAME" \
             use_sim_time:="$USE_SIM_TIME" \
             enable_viz:="$ENABLE_VIZ" \
-            database_path:="$DATABASE_PATH" \
             map_mode:="$MAP_MODE" \
-            reset_map:="$RESET_MAP" &
+            reset_map:="$RESET_MAP" \
+            "${DB_ARG[@]}" &
         LAUNCH_PID=$!
         (
             python3 - <<'PYEOF'

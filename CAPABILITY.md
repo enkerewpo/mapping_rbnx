@@ -33,7 +33,7 @@ whichever primitive registered the contract.
 | `lidar3d` | `robonix/primitive/lidar/lidar3d` | 3D point cloud (e.g. MID-360) |
 | `lidar2d` | `robonix/primitive/lidar/lidar` | 2D LaserScan |
 | `imu` | `robonix/primitive/imu/imu` | IMU (lio engines) |
-| `rgbd` | `robonix/primitive/camera/depth` | depth image |
+| `depth` | `robonix/primitive/camera/depth` | depth image |
 | `rgb` | `robonix/primitive/camera/rgb` | rgb image |
 | `odom` | `robonix/primitive/chassis/odom` | wheel/external odom (else rtabmap runs its own icp_odometry) |
 
@@ -45,15 +45,43 @@ subscription rather than blocking.
 ```yaml
 config:
   algo: rtabmap                       # rtabmap | dlio | fastlio2[broken]
-  sensors: { lidar2d: true, rgbd: true, odom: true }   # what the robot has
-  # frames / time (optional; defaults = webots tiago)
+  platform: x86_desktop               # x86_desktop | jetson_orin (optional)
+  # what the robot actually has — see the sensor table below. Required;
+  # the package refuses to guess (an empty/missing `sensors:` errors out).
+  sensors: { lidar2d: true, odom: true, rgb: true, depth: true }
+  # frames / time (all optional; defaults shown = webots tiago)
   base_frame: base_link
   odom_frame: odom
+  map_frame: map
   use_sim_time: true
-  # map persistence (optional; rtabmap only)
+  # map persistence (optional; rtabmap only — see "Map persistence" below)
   map_id: lab_3f                      # stable id; bind the SAME id in scene
   map_mode: mapping                   # mapping | localization
   reset_map: false                    # true = start a named map fresh
+```
+
+### `sensors:` keys
+
+Booleans; set `true` only for what the body provides. Each maps to an atlas
+contract the package resolves at init (it never hardcodes a topic). **`rgb`
+and `depth` are separate** — for full RGB-D visual fusion (loop closure +
+below-lidar depth obstacles) enable **both**.
+
+| key       | atlas contract                      | feeds rtabmap   |
+| --------- | ----------------------------------- | --------------- |
+| `lidar2d` | `robonix/primitive/lidar/lidar`     | `scan` (2D)     |
+| `lidar3d` | `robonix/primitive/lidar/lidar3d`   | `scan_cloud`    |
+| `rgb`     | `robonix/primitive/camera/rgb`      | `rgb` image     |
+| `depth`   | `robonix/primitive/camera/depth`    | `depth` image   |
+| `imu`     | `robonix/primitive/imu/imu`         | `imu`           |
+| `odom`    | `robonix/primitive/chassis/odom`    | `odom`          |
+
+Examples:
+
+```yaml
+sensors: { lidar2d: true, odom: true, rgb: true, depth: true }  # webots tiago (RGB-D fusion)
+sensors: { lidar2d: true, odom: true }                          # 2D-lidar only, no images
+sensors: { lidar3d: true, rgb: true, depth: true, odom: true, imu: true }  # Mid-360 robot
 ```
 
 `sensors:` is required and must list at least one sensor — the package

@@ -220,6 +220,33 @@ def switch_mode_impl(mode: str) -> dict:
         return {"ok": False, "detail": str(e)}
 
 
+# ── reset_map ─────────────────────────────────────────────────────────────────
+def reset_map_impl() -> dict:
+    """Wipe the running rtabmap's map (working memory + live database) and
+    restart SLAM from scratch — for when mapping has diverged and you want a
+    clean rebuild without a full redeploy. Calls rtabmap's `/rtabmap/reset`
+    (std_srvs/Empty).
+
+    Caveat: rtabmap restarts with the robot's CURRENT pose as the new origin,
+    so the rebuilt map's frame will NOT align with the pre-reset one (origin
+    drift). Saved maps on disk are untouched. Returns {ok, detail}.
+    """
+    node = _get_node()
+    if node is None:
+        return {"ok": False, "detail": "rclpy node unavailable (ROS not running?)"}
+    try:
+        from std_srvs.srv import Empty
+        ok, res = _call_service(node, Empty, f"{RTABMAP_NS}/reset", Empty.Request(), timeout_s=10.0)
+        if not ok:
+            return {"ok": False, "detail": f"{res} — rtabmap /reset unavailable "
+                                           "(fall back to restart with config)"}
+        return {"ok": True, "detail": "map cleared — rebuilding from current pose "
+                                      "(origin reset; new frame won't match the old map)"}
+    except Exception as e:  # noqa: BLE001
+        log.exception("reset_map failed")
+        return {"ok": False, "detail": str(e)}
+
+
 # ── save_map ──────────────────────────────────────────────────────────────────
 def save_map_impl(map_id: str, note: str = "",
                   active_db: Optional[str] = None) -> dict:
@@ -264,3 +291,21 @@ def save_map_impl(map_id: str, note: str = "",
     except Exception as e:  # noqa: BLE001
         log.exception("save_map failed for %s", map_id)
         return {"ok": False, "map_id": map_id, "database_path": "", "detail": str(e)}
+
+
+# ── delete_map ────────────────────────────────────────────────────────────────
+def delete_map_impl(map_id: str) -> dict:
+    """Remove a saved map's directory ({MAPS_DIR}/<map_id>/) and all its
+    artifacts (db + preview). Refuses an empty id or a missing map. Does not
+    touch the live SLAM session — only on-disk storage. Returns {ok, detail}."""
+    map_id = _sanitize_map_id(map_id)
+    map_dir = os.path.join(MAPS_DIR, map_id)
+    try:
+        if not os.path.isdir(map_dir):
+            return {"ok": False, "map_id": map_id, "detail": f"no saved map {map_id!r}"}
+        import shutil
+        shutil.rmtree(map_dir)
+        return {"ok": True, "map_id": map_id, "detail": f"deleted {map_id}"}
+    except Exception as e:  # noqa: BLE001
+        log.exception("delete_map failed for %s", map_id)
+        return {"ok": False, "map_id": map_id, "detail": str(e)}

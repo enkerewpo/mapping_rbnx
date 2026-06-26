@@ -17,6 +17,7 @@ binds 0.0.0.0 so it's reachable from the operator's laptop on the robot LAN.
 """
 from __future__ import annotations
 
+import collections
 import io
 import json
 import logging
@@ -39,6 +40,64 @@ POSE_TOPIC = os.environ.get("MAPPING_POSE_TOPIC", "/robonix/map/pose")
 _latest = {"grid": None, "pose": None}
 _subscribed = False
 _sub_lock = threading.Lock()
+
+# ── activity log ──────────────────────────────────────────────────────────────
+# A small in-memory ring of timestamped action records so the operator can see,
+# in the page, what each button did and how a pose_estimate converged. Surfaced
+# at GET /api/log; also mirrored to the Python logger.
+_LOG = collections.deque(maxlen=200)
+_log_lock = threading.Lock()
+# Last pose_estimate seed, so convergence can be measured against where the
+# robot actually settled after relocalizing.
+_seed = {"x": None, "y": None, "theta": None, "t": 0.0}
+# Last commanded SLAM mode, surfaced so the UI can show/highlight it. Seeded
+# from the config startup map_mode via set_mode_hint(); updated on switch/load.
+_mode = os.environ.get("MAPPING_STARTUP_MODE", "mapping")
+
+
+def set_mode_hint(mode: str) -> None:
+    """Record the current SLAM mode for the UI (called by atlas_bridge at init
+    with the config's startup map_mode, and by the switch/load handlers)."""
+    global _mode
+    if mode:
+        _mode = mode
+
+
+def _log_add(kind: str, msg: str) -> None:
+    """Append one timestamped entry (kind ∈ save|load|switch|pose|info) to the
+    UI activity log and mirror it to the service logger."""
+    with _log_lock:
+        _LOG.append({"t": time.time(), "kind": kind, "msg": msg})
+    log.info("[webui:%s] %s", kind, msg)
+
+
+def _live_pose_xytheta():
+    """Current map-frame pose as (x, y, yaw) from the latest /pose, or None."""
+    ps = _latest.get("pose")
+    if ps is None:
+        return None
+    pp = ps.pose.pose
+    q = pp.orientation
+    yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+    return pp.position.x, pp.position.y, yaw
+
+
+def _track_convergence(sx: float, sy: float, stheta: float, settle_s: float = 4.0) -> None:
+    """After seeding a pose, wait settle_s for rtabmap to relocalize, then log
+    where the robot actually settled and its offset from the clicked estimate
+    (distance in metres + heading delta in degrees)."""
+    def _check():
+        time.sleep(settle_s)
+        cur = _live_pose_xytheta()
+        if cur is None:
+            _log_add("pose", "no live pose — cannot measure convergence")
+            return
+        cx, cy, cyaw = cur
+        dist = math.hypot(cx - sx, cy - sy)
+        dth = abs((cyaw - stheta + math.pi) % (2 * math.pi) - math.pi)
+        _log_add("pose", f"converged → ({cx:.2f}, {cy:.2f}, {math.degrees(cyaw):.0f}°)  "
+                         f"Δ from estimate = {dist:.2f} m / {math.degrees(dth):.0f}°")
+    threading.Thread(target=_check, daemon=True).start()
 
 
 def _ensure_subscriptions() -> None:
@@ -152,9 +211,12 @@ _PAGE = """<!doctype html><html><head><meta charset=utf-8>
  header{padding:10px 16px;background:#171a21;font-weight:600}
  .wrap{display:flex;gap:16px;padding:16px;flex-wrap:wrap}
  .card{background:#171a21;border:1px solid #262b36;border-radius:8px;padding:12px}
- #mapimg{background:#000;border-radius:4px;max-width:720px;cursor:crosshair}
+ #mapcv{background:#0a0d12;border-radius:4px;display:block;cursor:grab;touch-action:none;width:720px;height:540px;max-width:100%}
+ #mapcv:active{cursor:grabbing}
  button{background:#2d6cdf;color:#fff;border:0;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:14px}
  button.alt{background:#3a4150}
+ button.active{background:#1f8a44;box-shadow:0 0 0 2px #2bd66f55}
+ button.del{background:#7a2d2d;padding:5px 9px}
  input,select{background:#0f1115;color:#e6e6e6;border:1px solid #2a3140;border-radius:6px;padding:6px}
  .lib{display:flex;flex-direction:column;gap:8px;min-width:240px}
  .mapitem{display:flex;gap:8px;align-items:center;border:1px solid #262b36;border-radius:6px;padding:6px}
@@ -166,8 +228,9 @@ _PAGE = """<!doctype html><html><head><meta charset=utf-8>
 <div id=status>connecting…</div>
 <div class=wrap>
  <div class=card>
-  <div><img id=mapimg src="/api/map.png" alt="map"></div>
-  <div class=muted>click the map to set a pose estimate (relocalize)</div>
+  <canvas id=mapcv width=720 height=540></canvas>
+  <div class=muted>drag = pan · wheel = zoom · click = set pose estimate (relocalize)
+   · <button class=alt style="padding:2px 8px" onclick="fitView()">Fit</button></div>
  </div>
  <div class=card style="min-width:280px">
   <h3 style="margin:4px 0 10px">Save current map</h3>
@@ -175,32 +238,103 @@ _PAGE = """<!doctype html><html><head><meta charset=utf-8>
    <input id=saveid placeholder="map_id e.g. lab_3f" style="flex:1">
    <button onclick="doSave()">Save</button>
   </div>
-  <h3 style="margin:16px 0 10px">Mode</h3>
+  <h3 style="margin:16px 0 10px">Mode <span id=modebadge class=muted style="font-weight:400">mode: —</span></h3>
   <div style="display:flex;gap:8px">
-   <button onclick="doSwitch('mapping')">Mapping (build)</button>
-   <button class=alt onclick="doSwitch('localization')">Localization</button>
+   <button id=btn-mapping onclick="doSwitch('mapping')">Mapping (build)</button>
+   <button id=btn-localization class=alt onclick="doSwitch('localization')">Localization</button>
+  </div>
+  <div style="margin-top:10px">
+   <button class=del onclick="doReset()">Reset map (clear &amp; rebuild)</button>
+   <span class=muted>wipes the live map; origin drifts</span>
   </div>
   <h3 style="margin:16px 0 10px">Library</h3>
   <div id=lib class=lib></div>
  </div>
+ <div class=card style="min-width:340px;flex:1">
+  <h3 style="margin:4px 0 10px">Activity log</h3>
+  <div id=logbox style="height:360px;overflow:auto;font-family:ui-monospace,monospace;font-size:12px;line-height:1.5"></div>
+ </div>
 </div>
 <script>
 function setStatus(t){document.getElementById('status').textContent=t}
-function refreshMap(){document.getElementById('mapimg').src='/api/map.png?'+Date.now()}
-setInterval(refreshMap,2000)
-async function poll(){try{let s=await (await fetch('/api/state')).json();
-  setStatus(s.has_map?('map '+s.width+'×'+s.height+' @'+s.resolution+'m  pose='+(s.pose?('('+s.pose.x.toFixed(2)+', '+s.pose.y.toFixed(2)+', '+s.pose.theta.toFixed(2)+')'):'—')):'no map yet')}
+// ── interactive canvas map: pan (drag) / zoom (wheel) / grid / pose / click-pose
+// ── scene-style world-centered canvas (proven model from scene webui) ──
+// fit() pins the canvas backing-store resolution to its CSS display size,
+// so pointer coords map 1:1 — this is what kept the click coords honest.
+const cv=document.getElementById('mapcv'),cx=cv.getContext('2d');
+function fit(){if(cv.width!=cv.clientWidth)cv.width=cv.clientWidth;if(cv.height!=cv.clientHeight)cv.height=cv.clientHeight}
+window.addEventListener('resize',()=>{fit();draw()});fit();
+let MI=null, mapImg=null;
+let center=[0,0], pxPerM=40, userMoved=false;   // world center + zoom
+function w2p(x,y){return [cv.width/2+(x-center[0])*pxPerM, cv.height/2-(y-center[1])*pxPerM]}
+function p2w(sx,sy){return [center[0]+(sx-cv.width/2)/pxPerM, center[1]-(sy-cv.height/2)/pxPerM]}
+function reloadMapImg(){let i=new Image();i.onload=()=>{mapImg=i;draw()};i.onerror=()=>{};i.src='/api/map.png?'+Date.now()}
+function fitView(){if(!MI)return;userMoved=false;fit();
+ let wM=MI.width*MI.resolution,hM=MI.height*MI.resolution;
+ center=MI.pose?[MI.pose.x,MI.pose.y]:[MI.origin_x+wM/2,MI.origin_y+hM/2];
+ pxPerM=Math.min(cv.width/wM,cv.height/hM)*0.9;draw()}
+function draw(){fit();cx.clearRect(0,0,cv.width,cv.height);
+ if(!MI){cx.fillStyle='#5a6172';cx.font='13px system-ui';cx.fillText('no map yet',16,24);return}
+ if(!userMoved&&MI.pose)center=[MI.pose.x,MI.pose.y];
+ // occupancy underlay — map.png is already y-flipped (row0 = world max-y),
+ // so place top-left at world (origin_x, origin_y+hMeters) and grow down.
+ if(mapImg&&MI.resolution>0){let wM=MI.width*MI.resolution,hM=MI.height*MI.resolution;
+  let tl=w2p(MI.origin_x,MI.origin_y+hM);
+  cx.imageSmoothingEnabled=false;cx.drawImage(mapImg,tl[0],tl[1],wM*pxPerM,hM*pxPerM)}
+ // 1 m grid aligned to world
+ cx.strokeStyle='rgba(90,130,200,0.18)';cx.lineWidth=1;
+ let step=pxPerM,ox=((cv.width/2)-center[0]*pxPerM)%step,oy=((cv.height/2)+center[1]*pxPerM)%step;
+ cx.beginPath();
+ for(let x=ox;x<cv.width;x+=step){cx.moveTo(x,0);cx.lineTo(x,cv.height)}
+ for(let y=oy;y<cv.height;y+=step){cx.moveTo(0,y);cx.lineTo(cv.width,y)}
+ cx.stroke();
+ // live pose marker
+ if(MI.pose){let p=w2p(MI.pose.x,MI.pose.y),yaw=MI.pose.theta;
+  cx.fillStyle='#e63b3b';cx.strokeStyle='#e63b3b';cx.lineWidth=2;
+  cx.beginPath();cx.arc(p[0],p[1],5,0,7);cx.fill();
+  cx.beginPath();cx.moveTo(p[0],p[1]);cx.lineTo(p[0]+18*Math.cos(yaw),p[1]-18*Math.sin(yaw));cx.stroke()}}
+setInterval(reloadMapImg,2000);reloadMapImg()
+// interaction — fit() makes internal==display, so (clientX-rect.left) is canvas px
+function pt(e){let r=cv.getBoundingClientRect();return [e.clientX-r.left,e.clientY-r.top]}
+let drag=null,moved=0;
+cv.addEventListener('mousedown',e=>{drag=pt(e);moved=0});
+window.addEventListener('mouseup',()=>{drag=null});
+window.addEventListener('mousemove',e=>{if(!drag)return;let p=pt(e);
+ center[0]-=(p[0]-drag[0])/pxPerM;center[1]+=(p[1]-drag[1])/pxPerM;
+ moved+=Math.abs(p[0]-drag[0])+Math.abs(p[1]-drag[1]);userMoved=true;drag=p;draw()});
+cv.addEventListener('wheel',e=>{e.preventDefault();let p=pt(e),wp=p2w(p[0],p[1]);
+ pxPerM*=e.deltaY<0?1.15:1/1.15;
+ center[0]=wp[0]-(p[0]-cv.width/2)/pxPerM;center[1]=wp[1]+(p[1]-cv.height/2)/pxPerM;userMoved=true;draw()},{passive:false});
+cv.addEventListener('dblclick',()=>fitView());
+cv.addEventListener('click',async e=>{if(moved>4||!MI)return;
+ let p=pt(e),wp=p2w(p[0],p[1]);
+ if(!confirm('Seed pose estimate at ('+wp[0].toFixed(2)+', '+wp[1].toFixed(2)+')?'))return;
+ setStatus('seeding pose…');
+ let r=await (await fetch('/api/pose_estimate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({x:wp[0],y:wp[1],theta:0})})).json();
+ setStatus(r.detail||'seeded')});
+async function poll(){try{let s=await (await fetch('/api/state')).json();MI=s;
+  if(CURMODE==null&&s.mode)CURMODE=s.mode;applyMode();
+  setStatus(s.has_map?('map '+s.width+'×'+s.height+' @'+s.resolution+'m  pose='+(s.pose?('('+s.pose.x.toFixed(2)+', '+s.pose.y.toFixed(2)+', '+s.pose.theta.toFixed(2)+')'):'—')+(s.dist_from_seed!=null?'  Δseed='+s.dist_from_seed+'m':'')):'no map yet');draw()}
   catch(e){setStatus('disconnected')}}
-setInterval(poll,1500);poll()
+setInterval(poll,1000);poll()
 async function loadLib(){let m=await (await fetch('/api/maps')).json();
  let el=document.getElementById('lib');el.innerHTML='';
  if(!m.length){el.innerHTML='<div class=muted>no saved maps yet</div>';return}
  for(const x of m){let d=document.createElement('div');d.className='mapitem';
   d.innerHTML=`<img src="/api/maps/${x.map_id}/preview.png?${Date.now()}">
    <div style="flex:1"><b>${x.map_id}</b><div class=muted>${(x.db_size/1e6).toFixed(1)} MB${x.has_db?'':' · no db'}</div></div>
-   <button class=alt onclick="doLoad('${x.map_id}')">Load</button>`;
+   <button class=alt onclick="doLoad('${x.map_id}')">Load</button>
+   <button class=del onclick="doDelete('${x.map_id}')">Del</button>`;
   el.appendChild(d)}}
 setInterval(loadLib,5000);loadLib()
+const KCOL={save:'#5bd66f',load:'#5aa9ff',switch:'#d6a85b',pose:'#d65b9a',info:'#8b93a3'};
+async function loadLog(){try{let L=await (await fetch('/api/log')).json();
+ let box=document.getElementById('logbox');let atBottom=box.scrollTop+box.clientHeight>=box.scrollHeight-20;
+ box.innerHTML=L.map(e=>{let t=new Date(e.t*1000).toLocaleTimeString();
+  let c=KCOL[e.kind]||'#8b93a3';
+  return `<div><span class=muted>${t}</span> <b style="color:${c}">${e.kind}</b> ${e.msg.replace(/</g,'&lt;')}</div>`}).join('');
+ if(atBottom)box.scrollTop=box.scrollHeight}catch(e){}}
+setInterval(loadLog,1500);loadLog()
 async function doSave(){let id=document.getElementById('saveid').value.trim();
  if(!id){alert('enter a map_id');return}setStatus('saving '+id+'…');
  let r=await (await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({map_id:id})})).json();
@@ -210,18 +344,19 @@ async function doLoad(id){if(!confirm('Load map '+id+' (localization)?'))return;
  setStatus(r.detail||'loaded')}
 async function doSwitch(mode){setStatus('switching to '+mode+'…');
  let r=await (await fetch('/api/switch_mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:mode})})).json();
- setStatus(r.detail||('mode '+mode))}
-document.getElementById('mapimg').addEventListener('click',async ev=>{
- let img=ev.target,rect=img.getBoundingClientRect();
- let fx=(ev.clientX-rect.left)/rect.width, fy=(ev.clientY-rect.top)/rect.height;
- let s=await (await fetch('/api/state')).json();
- if(!s.has_map){alert('no map');return}
- let x=s.origin_x+fx*s.width*s.resolution;
- let y=s.origin_y+(1-fy)*s.height*s.resolution;
- if(!confirm('Seed pose estimate at ('+x.toFixed(2)+', '+y.toFixed(2)+')?'))return;
- setStatus('seeding pose…');
- let r=await (await fetch('/api/pose_estimate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({x:x,y:y,theta:0})})).json();
- setStatus(r.detail||'seeded')})
+ if(r.ok)CURMODE=mode;applyMode();setStatus(r.detail||('mode '+mode))}
+async function doReset(){if(!confirm('Clear the LIVE map and rebuild from scratch?\n\nThe new map origin = robot current position, so it will NOT match the old frame (origin drift). Saved maps on disk are not affected.'))return;
+ setStatus('resetting map…');
+ let r=await (await fetch('/api/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
+ setStatus(r.detail||'reset')}
+async function doDelete(id){if(!confirm('Delete saved map '+id+'? This cannot be undone.'))return;
+ setStatus('deleting '+id+'…');
+ let r=await (await fetch('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({map_id:id})})).json();
+ setStatus(r.detail||'deleted');loadLib()}
+let CURMODE=null;
+function applyMode(){let mp=document.getElementById('btn-mapping'),lo=document.getElementById('btn-localization');
+ let bdg=document.getElementById('modebadge');if(bdg)bdg.textContent=CURMODE?('mode: '+CURMODE):'mode: —';
+ if(mp&&lo){mp.classList.toggle('active',CURMODE=='mapping');lo.classList.toggle('active',CURMODE=='localization')}}
 </script></body></html>"""
 
 
@@ -249,24 +384,29 @@ class _Handler(BaseHTTPRequestHandler):
                 g = _latest["grid"]
                 if g is None:
                     return self._send(503, "text/plain", b"no map yet")
-                return self._send(200, "image/png", _grid_to_png(g, _latest["pose"]))
+                # Pure occupancy only — the live pose marker is drawn by the
+                # canvas on top, so don't bake a second (scaled) one into the PNG.
+                return self._send(200, "image/png", _grid_to_png(g))
             if p == "/api/state":
                 _ensure_subscriptions()
                 g = _latest["grid"]
-                st = {"has_map": g is not None}
+                st = {"has_map": g is not None, "mode": _mode}
                 if g is not None:
                     st.update(width=g.info.width, height=g.info.height,
                               resolution=round(g.info.resolution, 4),
                               origin_x=g.info.origin.position.x,
                               origin_y=g.info.origin.position.y)
-                ps = _latest["pose"]
-                if ps is not None:
-                    pp = ps.pose.pose
-                    q = pp.orientation
-                    yaw = math.atan2(2 * (q.w * q.z + q.x * q.y),
-                                     1 - 2 * (q.y * q.y + q.z * q.z))
-                    st["pose"] = {"x": pp.position.x, "y": pp.position.y, "theta": yaw}
+                cur = _live_pose_xytheta()
+                if cur is not None:
+                    st["pose"] = {"x": cur[0], "y": cur[1], "theta": cur[2]}
+                    if _seed["x"] is not None:
+                        st["seed"] = {"x": _seed["x"], "y": _seed["y"], "theta": _seed["theta"]}
+                        st["dist_from_seed"] = round(math.hypot(cur[0] - _seed["x"],
+                                                                cur[1] - _seed["y"]), 3)
                 return self._json(st)
+            if p == "/api/log":
+                with _log_lock:
+                    return self._json(list(_LOG))
             if p == "/api/maps":
                 return self._json(_list_saved_maps())
             if p.startswith("/api/maps/") and p.endswith("/preview.png"):
@@ -286,23 +426,48 @@ class _Handler(BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(n) or b"{}")
             if p == "/api/save":
-                out = map_ops.save_map_impl(body.get("map_id", ""), body.get("note", ""),
+                mid = body.get("map_id", "")
+                out = map_ops.save_map_impl(mid, body.get("note", ""),
                                             active_db=_active_db_hint())
+                _log_add("save", out.get("detail") or (f"saved {mid}" if out.get("ok") else "save failed"))
                 return self._json(out)
             if p == "/api/load":
+                mid, mode = body.get("map_id", ""), body.get("mode", "localization")
                 out = map_ops.load_map_impl(
-                    body.get("map_id", ""), body.get("mode", "localization"),
-                    bool(body.get("has_initial_pose", False)),
+                    mid, mode, bool(body.get("has_initial_pose", False)),
                     float(body.get("x", 0.0)), float(body.get("y", 0.0)),
                     float(body.get("theta", 0.0)))
+                if out.get("ok"):
+                    set_mode_hint(mode)
+                _log_add("load", f"{'✓' if out.get('ok') else '✗'} load {mid} ({mode}): {out.get('detail','')}")
+                return self._json(out)
+            if p == "/api/delete":
+                mid = body.get("map_id", "")
+                out = map_ops.delete_map_impl(mid)
+                _log_add("delete", out.get("detail") or (f"deleted {mid}" if out.get("ok") else "delete failed"))
+                return self._json(out)
+            if p == "/api/reset":
+                out = map_ops.reset_map_impl()
+                _log_add("reset", out.get("detail") or ("map cleared" if out.get("ok") else "reset failed"))
                 return self._json(out)
             if p == "/api/pose_estimate":
-                out = map_ops.pose_estimate_impl(
-                    float(body.get("x", 0.0)), float(body.get("y", 0.0)),
-                    float(body.get("theta", 0.0)))
+                x, y, th = (float(body.get("x", 0.0)), float(body.get("y", 0.0)),
+                            float(body.get("theta", 0.0)))
+                out = map_ops.pose_estimate_impl(x, y, th)
+                if out.get("ok"):
+                    _seed.update(x=x, y=y, theta=th, t=time.time())
+                    _log_add("pose", f"estimate seeded → ({x:.2f}, {y:.2f}, {math.degrees(th):.0f}°); "
+                                     "waiting for relocalization…")
+                    _track_convergence(x, y, th)
+                else:
+                    _log_add("pose", f"✗ pose estimate: {out.get('detail','')}")
                 return self._json(out)
             if p == "/api/switch_mode":
-                out = map_ops.switch_mode_impl(body.get("mode", ""))
+                mode = body.get("mode", "")
+                out = map_ops.switch_mode_impl(mode)
+                if out.get("ok"):
+                    set_mode_hint(mode)
+                _log_add("switch", f"{'✓' if out.get('ok') else '✗'} switch to {mode}: {out.get('detail','')}")
                 return self._json(out)
             return self._send(404, "text/plain", b"not found")
         except Exception as e:  # noqa: BLE001

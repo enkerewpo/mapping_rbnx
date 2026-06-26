@@ -90,6 +90,43 @@ maps/lab_3f/rtabmap.db  occupancy.pgm  occupancy.yaml  occupancy.png  cloud.pcd 
 > frame is loaded from the saved db. Without `map_mode: localization` the
 > map origin resets to the robot's boot pose each run.
 
+## Web UI (live map + runtime map ops)
+
+Set `MAPPING_WEBUI_PORT` (e.g. `8091`) to enable a dependency-light operator
+page (stdlib `http.server` + Pillow), served on `0.0.0.0` so it's reachable
+from a laptop on the robot LAN (`http://<robot-ip>:8091`). Off by default.
+
+It runs **inside the mapping bridge process**, so its buttons call the same
+`map_ops` impls the gRPC/MCP capabilities use — no extra round trip — and it
+reads the live `/map` + pose straight off the bridge's rclpy node.
+
+- **Live map canvas** — occupancy grid + robot pose, with **drag-to-pan,
+  wheel-zoom, a 1 m grid, and double-click-to-fit**. Same world-centered
+  view model as scene's web UI (canvas backing-store pinned to display size,
+  so click coordinates are exact).
+- **Save** — snapshot the live map under a `map_id` (writes
+  `rtabmap.db` + `occupancy.png/pgm/yaml` + `meta.yaml`).
+- **Library** — every saved map with a thumbnail; **Load** re-localizes onto
+  it, **Del** removes it from disk.
+- **Mode** — flip **Mapping ⇄ Localization** at runtime; a badge + button
+  highlight shows the current mode.
+- **Reset map** — wipe the live SLAM session and rebuild from scratch (for
+  when mapping diverges). Note: the origin resets to the robot's *current*
+  pose, so the rebuilt frame won't match the old map (origin drift).
+- **Click the map → pose estimate** — seeds `/initialpose` so rtabmap
+  re-localizes; the **activity log** records the seeded pose and, a few
+  seconds later, where it converged + the distance from your estimate.
+
+These are the same operations exposed as runtime **RPC + MCP capabilities**
+(so Pilot can drive them too): `save_map`, `load_map`, `pose_estimate`,
+`switch_mode` (the webui adds `reset` + `delete` on top). All work on the
+running rtabmap without a redeploy — `load`/`switch_mode` call rtabmap's
+runtime services and fall back to a restart with the config's `map_mode` /
+`map_id` when those services aren't reachable.
+
+> The web UI has no auth — it's a LAN debug tool. Don't expose the port to an
+> untrusted network.
+
 ## Layout
 
 ```

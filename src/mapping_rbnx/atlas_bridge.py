@@ -64,6 +64,8 @@ from map_mcp import (  # type: ignore  # noqa: E402
     DeleteMap_Response as McpDeleteResp,
     ResetMap_Request as McpResetReq,
     ResetMap_Response as McpResetResp,
+    GetPose_Request as McpGetPoseReq,
+    GetPose_Response as McpGetPoseResp,
 )
 from mapping_rbnx import map_ops  # noqa: E402
 from mapping_rbnx import webui  # noqa: E402
@@ -602,6 +604,15 @@ def get_mode(req: McpGetModeReq) -> McpGetModeResp:
     return McpGetModeResp(**map_ops.get_mode_impl())
 
 
+@mapping.mcp("robonix/service/map/get_pose")
+def get_pose(req: McpGetPoseReq) -> McpGetPoseResp:
+    """Read the robot's current pose (x, y, theta=yaw) in the SLAM map frame.
+    Read-only — use it to record a named waypoint, report where the robot is,
+    or decide an action by location. Complements pose_estimate, which SEEDS a
+    pose for relocalization rather than reading the current one."""
+    return McpGetPoseResp(**map_ops.get_pose_impl())
+
+
 @mapping.mcp("robonix/service/map/delete_map")
 def delete_map(req: McpDeleteReq) -> McpDeleteResp:
     """Permanently delete a saved map by id (its rtabmap.db + preview files on
@@ -629,6 +640,11 @@ class _GetModeServicer(contracts_grpc.RobonixServiceMapGetModeServicer):
         return map_pb2.GetMode_Response(**map_ops.get_mode_impl())
 
 
+class _GetPoseServicer(contracts_grpc.RobonixServiceMapGetPoseServicer):
+    def GetPose(self, request, context):
+        return map_pb2.GetPose_Response(**map_ops.get_pose_impl())
+
+
 class _DeleteMapServicer(contracts_grpc.RobonixServiceMapDeleteMapServicer):
     def DeleteMap(self, request, context):
         return map_pb2.DeleteMap_Response(**map_ops.delete_map_impl(request.map_id))
@@ -644,6 +660,7 @@ mapping.attach_grpc_servicer("robonix/service/map/load_map", _LoadMapServicer())
 mapping.attach_grpc_servicer("robonix/service/map/pose_estimate", _PoseEstimateServicer())
 mapping.attach_grpc_servicer("robonix/service/map/switch_mode", _SwitchModeServicer())
 mapping.attach_grpc_servicer("robonix/service/map/get_mode", _GetModeServicer())
+mapping.attach_grpc_servicer("robonix/service/map/get_pose", _GetPoseServicer())
 mapping.attach_grpc_servicer("robonix/service/map/delete_map", _DeleteMapServicer())
 mapping.attach_grpc_servicer("robonix/service/map/reset_map", _ResetMapServicer())
 

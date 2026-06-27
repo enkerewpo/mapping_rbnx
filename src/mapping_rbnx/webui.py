@@ -501,11 +501,18 @@ def maybe_start() -> None:
     port = os.environ.get("MAPPING_WEBUI_PORT", "").strip()
     if not port or _server is not None:
         return
+    # Bind 0.0.0.0 by default so the UI is reachable from the operator's
+    # machine over the deployment network (here: the Tailscale tailnet, which
+    # is itself access-controlled — only approved devices can reach it). This
+    # UI is an unauthenticated admin plane (delete / reset / load map, pose
+    # seed), so on an untrusted LAN lock it down with MAPPING_WEBUI_HOST=
+    # 127.0.0.1 (config webui_host) and reach it via VNC / SSH tunnel.
+    host = os.environ.get("MAPPING_WEBUI_HOST", "0.0.0.0").strip() or "0.0.0.0"
     try:
-        srv = ThreadingHTTPServer(("0.0.0.0", int(port)), _Handler)
+        srv = ThreadingHTTPServer((host, int(port)), _Handler)
     except Exception as e:  # noqa: BLE001
-        log.warning("webui: cannot bind port %s: %s", port, e)
+        log.warning("webui: cannot bind %s:%s: %s", host, port, e)
         return
     _server = srv
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    log.info("map web UI on http://0.0.0.0:%s", port)
+    log.info("map web UI on http://%s:%s", host, port)

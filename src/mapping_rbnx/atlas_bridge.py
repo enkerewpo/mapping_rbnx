@@ -448,9 +448,14 @@ def init(cfg: dict):
     # Declare outputs (after resolved.yaml so launch can start in parallel).
     _declare_outputs(mapping, algo)
 
-    # Optional map web UI (live preview + save/load/pose buttons). No-op unless
-    # MAPPING_WEBUI_PORT is set. Started here so the SLAM topics it previews
-    # exist by the time an operator opens the page.
+    # Map web UI (live preview + save/load/pose buttons). On by default at
+    # port 8091; override via config `webui_port` (set 0 / "" to disable).
+    # Set the env here rather than relying on an external export that gets
+    # lost across reboots, so the UI comes up on every boot. Started here so
+    # the SLAM topics it previews exist when an operator opens the page.
+    _webui_port = str(cfg.get("webui_port", 8091)).strip()
+    if _webui_port and _webui_port != "0":
+        os.environ["MAPPING_WEBUI_PORT"] = _webui_port
     webui.set_active_db_hint(_active_db)
     webui.maybe_start()
     return Ok()

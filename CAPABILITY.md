@@ -1,3 +1,7 @@
+---
+description: SLAM mapping — turns robot sensor streams into a live 2D occupancy grid, 3D point cloud, and SLAM-corrected pose; persists named maps for re-localization.
+---
+
 # mapping_rbnx — capability surface
 
 SLAM mapping service. Turns wheeled/legged-robot sensor streams into a live

@@ -338,11 +338,24 @@ def save_map_impl(map_id: str, note: str = "",
     try:
         os.makedirs(map_dir, exist_ok=True)
 
-        # If rtabmap's live db is a different file (ephemeral / different id),
-        # copy it in so the saved map is self-contained.
-        if active_db and os.path.isfile(active_db) and os.path.abspath(active_db) != os.path.abspath(db_path):
+        # Resolve the live rtabmap db to copy so the saved map is
+        # self-contained. The caller passes active_db for a named-map run; an
+        # ephemeral run (no map_id) leaves it empty, and rtabmap then writes to
+        # its default ~/.ros/rtabmap.db. Fall back to that (and an explicit
+        # RTABMAP_DATABASE_PATH override) so a Save in ephemeral mode still
+        # captures a real db instead of a preview-only "no db" entry.
+        live_db = active_db if (active_db and os.path.isfile(active_db)) else None
+        if live_db is None:
+            for cand in (
+                os.environ.get("RTABMAP_DATABASE_PATH", ""),
+                os.path.expanduser("~/.ros/rtabmap.db"),
+            ):
+                if cand and os.path.isfile(cand):
+                    live_db = cand
+                    break
+        if live_db and os.path.abspath(live_db) != os.path.abspath(db_path):
             import shutil
-            shutil.copy2(active_db, db_path)
+            shutil.copy2(live_db, db_path)
 
         # Portable preview (pgm/png/pcd/meta) from the live /map + cloud topics.
         import subprocess

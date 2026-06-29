@@ -66,6 +66,7 @@ RUN pip install --no-cache-dir \
         protobuf>=4.25.0 \
         pyyaml>=6.0 \
         numpy \
+        pillow \
         mcp>=1.28.1
 
 WORKDIR /mapping
